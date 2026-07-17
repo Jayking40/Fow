@@ -15,4 +15,6 @@ pub enum ContractError {
     InvalidRequestStatus = 307,
     /// Caller is not the hospital that owns this request.
     NotRequestOwner = 308,
+    /// Storage is already at the schema version this binary targets.
+    MigrationAlreadyApplied = 309,
 }

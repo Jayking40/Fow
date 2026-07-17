@@ -30,4 +30,12 @@ pub enum CoordinatorError {
 
     // Circuit breaker
     ContractPaused = 840,
+
+    // Upgrade lifecycle (#31)
+    MigrationAlreadyApplied = 850,
+    UpgradeAlreadyPending = 851,
+    NoPendingUpgrade = 852,
+    TimelockNotElapsed = 853,
+    /// A domain contract reports a code version outside the supported range.
+    IncompatibleContractVersion = 854,
 }

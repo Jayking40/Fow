@@ -17,3 +17,8 @@ request-contract  = { path = "../requests" }
 inventory-contract = { path = "../inventory" }
 payment-contract  = { path = "../payments" }
 delivery-contract = { path = "../delivery" }
+
+[features]
+# Enables the full upgrade rehearsal test, which swaps in the real compiled
+# WASM. Build the workspace WASMs first: scripts/test-upgrade-rehearsal.sh
+upgrade-rehearsal = []

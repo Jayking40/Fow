@@ -803,3 +803,171 @@ fn test_vesting_events_emitted() {
     let schedule = client.get_vesting(&donor);
     assert_eq!(schedule.claimed, 200_000i128);
 }
+
+// ── Timelocked upgradeability & versioned schema (#31) ─────────────────────────
+
+#[test]
+fn test_version_and_default_schema_version() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    assert_eq!(client.version(), CONTRACT_VERSION);
+    assert_eq!(client.schema_version(), 1);
+}
+
+#[test]
+fn test_propose_upgrade_queues_behind_timelock() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    env.ledger().with_mut(|l| l.timestamp = 10_000);
+
+    let hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+    let executable_at = client.propose_upgrade(&hash);
+    assert_eq!(executable_at, 10_000 + UPGRADE_TIMELOCK_SECS);
+
+    let pending = client.get_pending_upgrade().unwrap();
+    assert_eq!(pending.new_wasm_hash, hash);
+    assert_eq!(pending.proposed_at, 10_000);
+    assert_eq!(pending.executable_at, executable_at);
+}
+
+#[test]
+fn test_execute_upgrade_before_timelock_elapses_fails() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    env.ledger().with_mut(|l| l.timestamp = 10_000);
+
+    let hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+    let executable_at = client.propose_upgrade(&hash);
+
+    env.ledger().with_mut(|l| l.timestamp = executable_at - 1);
+    assert_eq!(
+        client.try_execute_upgrade(),
+        Err(Ok(Error::TimelockNotElapsed))
+    );
+    // Still queued — nothing was consumed by the failed attempt.
+    assert!(client.get_pending_upgrade().is_some());
+}
+
+#[test]
+fn test_propose_upgrade_twice_fails() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+    client.propose_upgrade(&hash);
+    assert_eq!(
+        client.try_propose_upgrade(&hash),
+        Err(Ok(Error::UpgradeAlreadyPending))
+    );
+}
+
+#[test]
+fn test_cancel_upgrade_clears_pending_proposal() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+    client.propose_upgrade(&hash);
+    client.cancel_upgrade();
+
+    assert!(client.get_pending_upgrade().is_none());
+    assert_eq!(
+        client.try_execute_upgrade(),
+        Err(Ok(Error::NoPendingUpgrade))
+    );
+}
+
+#[test]
+fn test_execute_upgrade_without_proposal_fails() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    assert_eq!(
+        client.try_execute_upgrade(),
+        Err(Ok(Error::NoPendingUpgrade))
+    );
+}
+
+#[test]
+fn test_migrate_refuses_to_run_twice() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    // Simulate storage written by an older binary (schema 0 < target).
+    env.as_contract(&cid, || {
+        env.storage()
+            .instance()
+            .set(&crate::SCHEMA_VERSION_KEY, &0u32)
+    });
+    assert_eq!(client.schema_version(), 0);
+
+    assert_eq!(client.migrate(), TARGET_SCHEMA_VERSION);
+    assert_eq!(client.schema_version(), TARGET_SCHEMA_VERSION);
+
+    // Double-run guard: a second invocation is refused.
+    assert_eq!(
+        client.try_migrate(),
+        Err(Ok(Error::MigrationAlreadyApplied))
+    );
+}
+
+#[test]
+fn test_migrate_refused_at_current_schema() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    assert_eq!(
+        client.try_migrate(),
+        Err(Ok(Error::MigrationAlreadyApplied))
+    );
+}
+
+/// Full upgrade rehearsal against the real compiled WASM: populate an open
+/// escrow, propose → timelock → execute the upgrade, then prove the
+/// in-flight escrow still settles correctly on the new binary.
+///
+/// Requires the workspace WASMs to be built first — run via
+/// `scripts/test-upgrade-rehearsal.sh`.
+#[cfg(feature = "upgrade-rehearsal")]
+mod upgrade_rehearsal {
+    use super::*;
+
+    const PAYMENT_WASM: &[u8] = include_bytes!(
+        "../../../target/wasm32v1-none/release/payment_contract.wasm"
+    );
+
+    #[test]
+    fn test_upgrade_rehearsal_inflight_escrow_settles_after_upgrade() {
+        let (env, cid, admin) = setup_with_admin();
+        let client = PaymentContractClient::new(&env, &cid);
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        // Realistic in-flight state: an open escrow holding donor funds.
+        let hospital = Address::generate(&env);
+        let payee = Address::generate(&env);
+        let token = deploy_token_with_balance(&env, &admin, &hospital, 5_000);
+        let payment_id = client.create_escrow(&1u64, &hospital, &payee, &5_000i128, &token);
+
+        // Propose → wait out the 48h timelock → execute the WASM swap.
+        let wasm_hash = env.deployer().upload_contract_wasm(PAYMENT_WASM);
+        let executable_at = client.propose_upgrade(&wasm_hash);
+        env.ledger().with_mut(|l| l.timestamp = executable_at + 1);
+        client.execute_upgrade();
+
+        // Same contract ID, storage intact, new binary answering.
+        assert_eq!(client.version(), CONTRACT_VERSION);
+        let payment = client.get_payment(&payment_id);
+        assert_eq!(payment.status, PaymentStatus::Locked);
+        assert_eq!(payment.amount, 5_000);
+
+        // Schema unchanged between identical binaries — migrate must refuse.
+        assert_eq!(
+            client.try_migrate(),
+            Err(Ok(Error::MigrationAlreadyApplied))
+        );
+
+        // The in-flight escrow completes correctly post-upgrade.
+        client.release_escrow(&admin, &payment_id);
+        let token_client = soroban_sdk::token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&payee), 5_000i128);
+        assert_eq!(client.get_payment(&payment_id).status, PaymentStatus::Released);
+    }
+}

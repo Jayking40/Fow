@@ -133,6 +133,14 @@ pub enum Error {
     PaymentNotLocked = 515,
     /// Dispute timeout has not yet elapsed.
     DisputeNotExpired = 516,
+    /// Storage is already at the schema version this binary targets.
+    MigrationAlreadyApplied = 517,
+    /// An upgrade proposal is already queued.
+    UpgradeAlreadyPending = 518,
+    /// No upgrade proposal is queued.
+    NoPendingUpgrade = 519,
+    /// The upgrade timelock window has not elapsed yet.
+    TimelockNotElapsed = 520,
 }
 
 // ── Storage keys ───────────────────────────────────────────────────────────────
@@ -1178,6 +1186,152 @@ impl PaymentContract {
             page_size,
         }
     }
+
+    // ── Timelocked upgradeability & versioned storage schema (#31) ───────────
+
+    /// Code version of the currently deployed binary.
+    pub fn version(_env: Env) -> u32 {
+        CONTRACT_VERSION
+    }
+
+    /// Storage schema version currently recorded on-chain (1 when unset).
+    pub fn schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&SCHEMA_VERSION_KEY)
+            .unwrap_or(1)
+    }
+
+    /// Propose replacing the running WASM. Admin only. This contract holds
+    /// (or orchestrates) escrowed funds, so the upgrade only becomes
+    /// executable after `UPGRADE_TIMELOCK_SECS` — it can never be swapped
+    /// instantly. Returns the ledger timestamp at which `execute_upgrade`
+    /// becomes callable.
+    pub fn propose_upgrade(
+        env: Env,
+        new_wasm_hash: soroban_sdk::BytesN<32>,
+    ) -> Result<u64, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+        if env.storage().instance().has(&PENDING_UPGRADE_KEY) {
+            return Err(Error::UpgradeAlreadyPending);
+        }
+        let now = env.ledger().timestamp();
+        let pending = PendingUpgrade {
+            new_wasm_hash,
+            proposed_at: now,
+            executable_at: now + UPGRADE_TIMELOCK_SECS,
+        };
+        env.storage().instance().set(&PENDING_UPGRADE_KEY, &pending);
+        env.events().publish(
+            (symbol_short!("upgrade"), symbol_short!("proposed")),
+            pending.executable_at,
+        );
+        Ok(pending.executable_at)
+    }
+
+    /// Cancel the pending upgrade proposal. Admin only.
+    pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+        if !env.storage().instance().has(&PENDING_UPGRADE_KEY) {
+            return Err(Error::NoPendingUpgrade);
+        }
+        env.storage().instance().remove(&PENDING_UPGRADE_KEY);
+        env.events()
+            .publish((symbol_short!("upgrade"), symbol_short!("canceled")), ());
+        Ok(())
+    }
+
+    /// The currently pending upgrade proposal, if any.
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&PENDING_UPGRADE_KEY)
+    }
+
+    /// Execute the proposed upgrade once its timelock has elapsed. Admin
+    /// only. The contract ID and all storage are preserved; call `migrate`
+    /// afterwards when the new binary bumps `TARGET_SCHEMA_VERSION`.
+    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&PENDING_UPGRADE_KEY)
+            .ok_or(Error::NoPendingUpgrade)?;
+        if env.ledger().timestamp() < pending.executable_at {
+            return Err(Error::TimelockNotElapsed);
+        }
+        env.storage().instance().remove(&PENDING_UPGRADE_KEY);
+        env.events()
+            .publish((symbol_short!("upgrade"), symbol_short!("executed")), ());
+        env.deployer().update_current_contract_wasm(pending.new_wasm_hash);
+        Ok(())
+    }
+
+    /// Apply version-gated storage migrations after an upgrade. Admin only.
+    /// Refuses to run once storage already sits at `TARGET_SCHEMA_VERSION`,
+    /// so a migration can never be applied twice.
+    pub fn migrate(env: Env) -> Result<u32, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+        let current = Self::schema_version(env.clone());
+        if current >= TARGET_SCHEMA_VERSION {
+            return Err(Error::MigrationAlreadyApplied);
+        }
+        // Version-gated transformations run here as the schema evolves, e.g.
+        // `if current < 2 { /* rewrite v1 entries into the v2 layout */ }`.
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
+        Ok(TARGET_SCHEMA_VERSION)
+    }
 }
 
 mod test;
+
+// ── Upgradeability & versioned storage schema (#31) ───────────────────────────
+//
+// Invariant: after an upgrade, the new binary must be able to read every
+// prior storage schema version until `migrate` has completed. Absence of the
+// stored schema version means schema 1.
+
+/// Code version compiled into this binary. Bump on every release.
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Storage schema version this binary writes. Bump only together with a
+/// version-gated transformation in `migrate`.
+pub const TARGET_SCHEMA_VERSION: u32 = 1;
+
+const SCHEMA_VERSION_KEY: soroban_sdk::Symbol = soroban_sdk::symbol_short!("SCHEMA_V");
+
+/// Delay between proposing and executing a WASM upgrade (48 hours). Applies
+/// because this contract participates in custody of escrowed donor funds.
+pub const UPGRADE_TIMELOCK_SECS: u64 = 172_800;
+
+const PENDING_UPGRADE_KEY: soroban_sdk::Symbol = soroban_sdk::symbol_short!("PEND_UPG");
+
+/// A queued WASM upgrade awaiting its timelock window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub proposed_at: u64,
+    pub executable_at: u64,
+}
