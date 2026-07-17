@@ -5,7 +5,7 @@ import { OrderEntity } from '../../src/orders/entities/order.entity';
 import { OrderStatus } from '../../src/orders/enums/order-status.enum';
 import { InventoryStockEntity } from '../../src/inventory/entities/inventory-stock.entity';
 
-// ── Request user ──────────────────────────────────────────────────────────────
+// ── User factories ────────────────────────────────────────────────────────────
 
 export const makeAdminUser = (
   overrides: Partial<{ id: string; role: string; email: string }> = {},
@@ -25,7 +25,16 @@ export const makeHospitalUser = (
   ...overrides,
 });
 
-// ── Blood request ─────────────────────────────────────────────────────────────
+export const makeDonorUser = (
+  overrides: Partial<{ id: string; role: string; email: string }> = {},
+) => ({
+  id: 'donor-1',
+  role: 'DONOR',
+  email: 'donor@test.com',
+  ...overrides,
+});
+
+// ── Blood request factories ───────────────────────────────────────────────────
 
 export const makeBloodRequestItem = (
   overrides: Partial<BloodRequestItemEntity> = {},
@@ -85,7 +94,7 @@ export const makeCreateBloodRequestDto = (
   ...overrides,
 });
 
-// ── Order ─────────────────────────────────────────────────────────────────────
+// ── Order factories ───────────────────────────────────────────────────────────
 
 export const makeOrder = (overrides: Partial<OrderEntity> = {}): OrderEntity =>
   ({
@@ -124,7 +133,7 @@ export const makeCreateOrderDto = (
   ...overrides,
 });
 
-// ── Inventory ─────────────────────────────────────────────────────────────────
+// ── Inventory factories ───────────────────────────────────────────────────────
 
 export const makeInventoryStock = (
   overrides: Partial<InventoryStockEntity> = {},
@@ -142,6 +151,33 @@ export const makeInventoryStock = (
     updatedAt: new Date(),
     ...overrides,
   } as InventoryStockEntity);
+
+// ── Seed helpers (composable across e2e, load, local dev) ────────────────────
+
+/** A canonical hospital + blood request seed used by e2e and load tests. */
+export function seedBloodRequestScenario(bankId = 'bank-1', bloodType = 'O+') {
+  return {
+    hospital: makeHospitalUser({ id: `hosp-${bankId}` }),
+    stock: makeInventoryStock({ bloodBankId: bankId, bloodType, availableUnitsMl: 5000 }),
+    request: makeBloodRequest({
+      hospitalId: `hosp-${bankId}`,
+      items: [makeBloodRequestItem({ bloodType, quantityMl: 450 })],
+    }),
+  };
+}
+
+/** JWT payload shape expected by the auth guard in tests. */
+export function makeJwtPayload(
+  overrides: Partial<{ sub: string; email: string; role: string; tenantId: string }> = {},
+) {
+  return {
+    sub: 'user-admin',
+    email: 'admin@test.com',
+    role: 'admin',
+    tenantId: 'tenant-default',
+    ...overrides,
+  };
+}
 
 // ── Mock repository builder ───────────────────────────────────────────────────
 
