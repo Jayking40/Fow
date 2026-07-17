@@ -2,6 +2,7 @@
 import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import ConnectWalletButton from "./blockchain/ConnectWalletButton";
 
 export default function Navbar() {
   const [isOpen, setIsOpen] = useState(false);
@@ -62,6 +63,8 @@ export default function Navbar() {
               Enter App
             </button>
           </Link>
+
+          <ConnectWalletButton />
         </div>
 
         {/* Mobile Menu Dropdown */}
@@ -77,6 +80,7 @@ export default function Navbar() {
                 Enter App
               </button>
             </Link>
+            <ConnectWalletButton />
           </div>
         )}
 
