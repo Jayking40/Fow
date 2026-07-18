@@ -157,6 +157,7 @@ pub enum Error {
     AlreadyInitialized = 405,
     NotInitialized = 406,
     ContractPaused = 407,
+    MigrationAlreadyApplied = 408,
 }
 
 /// Storage key for persisted reputation scores.
@@ -798,6 +799,72 @@ impl ReputationContract {
         }
         total
     }
+
+    // ── Upgradeability & versioned storage schema (#31) ──────────────────────
+
+    /// Code version of the currently deployed binary.
+    pub fn version(_env: Env) -> u32 {
+        CONTRACT_VERSION
+    }
+
+    /// Storage schema version currently recorded on-chain (1 when unset).
+    pub fn schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&SCHEMA_VERSION_KEY)
+            .unwrap_or(1)
+    }
+
+    /// Replace the running WASM with an already-installed hash. Admin only.
+    /// The contract ID and all storage are preserved; call `migrate` after
+    /// the upgrade when the new binary bumps `TARGET_SCHEMA_VERSION`.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotAuthorized)?;
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    /// Apply version-gated storage migrations after an upgrade. Admin only.
+    /// Refuses to run once storage already sits at `TARGET_SCHEMA_VERSION`,
+    /// so a migration can never be applied twice.
+    pub fn migrate(env: Env) -> Result<u32, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotAuthorized)?;
+        admin.require_auth();
+        let current = Self::schema_version(env.clone());
+        if current >= TARGET_SCHEMA_VERSION {
+            return Err(Error::MigrationAlreadyApplied);
+        }
+        // Version-gated transformations run here as the schema evolves, e.g.
+        // `if current < 2 { /* rewrite v1 entries into the v2 layout */ }`.
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
+        Ok(TARGET_SCHEMA_VERSION)
+    }
 }
 
 mod test;
+
+// ── Upgradeability & versioned storage schema (#31) ───────────────────────────
+//
+// Invariant: after an upgrade, the new binary must be able to read every
+// prior storage schema version until `migrate` has completed. Absence of the
+// stored schema version means schema 1.
+
+/// Code version compiled into this binary. Bump on every release.
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Storage schema version this binary writes. Bump only together with a
+/// version-gated transformation in `migrate`.
+pub const TARGET_SCHEMA_VERSION: u32 = 1;
+
+const SCHEMA_VERSION_KEY: soroban_sdk::Symbol = soroban_sdk::symbol_short!("SCHEMA_V");

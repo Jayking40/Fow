@@ -42,4 +42,7 @@ pub enum ContractError {
 
     // Circuit breaker (160)
     ContractPaused = 160,
+
+    // Upgrade lifecycle (170)
+    MigrationAlreadyApplied = 170,
 }

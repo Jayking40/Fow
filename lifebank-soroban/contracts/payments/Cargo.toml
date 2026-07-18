@@ -13,3 +13,8 @@ soroban-sdk = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+# Enables the full upgrade rehearsal test, which swaps in the real compiled
+# WASM. Build the workspace WASMs first: scripts/test-upgrade-rehearsal.sh
+upgrade-rehearsal = []

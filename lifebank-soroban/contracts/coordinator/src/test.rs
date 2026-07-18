@@ -30,6 +30,10 @@ struct MockRequestContract;
 
 #[contractimpl]
 impl MockRequestContract {
+    pub fn version() -> u32 {
+        1
+    }
+
     pub fn seed_request(env: Env, id: u64, status: RequestStatus) {
         env.storage()
             .persistent()
@@ -59,6 +63,10 @@ struct MockInventoryContract;
 
 #[contractimpl]
 impl MockInventoryContract {
+    pub fn version() -> u32 {
+        1
+    }
+
     pub fn initialize(env: Env, admin: Address) {
         env.storage().instance().set(&InvKey::Admin, &admin);
         env.storage().instance().set(&InvKey::Counter, &0u64);
@@ -157,6 +165,10 @@ struct MockPaymentContract;
 
 #[contractimpl]
 impl MockPaymentContract {
+    pub fn version() -> u32 {
+        1
+    }
+
     pub fn create_payment(env: Env, request_id: u64, status: PaymentStatus) -> u64 {
         let id: u64 = env
             .storage()
@@ -783,4 +795,220 @@ fn test_flag_temperature_breach_blocked_when_paused() {
     // Payment must remain Locked
     let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Locked);
+}
+
+// ── Timelocked upgradeability, schema migration & version gates (#31) ─────────
+
+mod upgrade_tests {
+    use super::*;
+    use crate::{CONTRACT_VERSION, TARGET_SCHEMA_VERSION, UPGRADE_TIMELOCK_SECS};
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::{contract, contractimpl, BytesN};
+
+    #[test]
+    fn test_version_and_default_schema_version() {
+        let h = setup();
+        assert_eq!(h.coord.version(), CONTRACT_VERSION);
+        assert_eq!(h.coord.schema_version(), 1);
+    }
+
+    #[test]
+    fn test_propose_upgrade_queues_behind_timelock() {
+        let h = setup();
+        h.env.ledger().with_mut(|l| l.timestamp = 10_000);
+
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        let executable_at = h.coord.propose_upgrade(&hash);
+        assert_eq!(executable_at, 10_000 + UPGRADE_TIMELOCK_SECS);
+
+        let pending = h.coord.get_pending_upgrade().unwrap();
+        assert_eq!(pending.new_wasm_hash, hash);
+        assert_eq!(pending.executable_at, executable_at);
+    }
+
+    #[test]
+    fn test_execute_upgrade_before_timelock_elapses_fails() {
+        let h = setup();
+        h.env.ledger().with_mut(|l| l.timestamp = 10_000);
+
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        let executable_at = h.coord.propose_upgrade(&hash);
+
+        h.env.ledger().with_mut(|l| l.timestamp = executable_at - 1);
+        assert_eq!(
+            h.coord.try_execute_upgrade(),
+            Err(Ok(CoordinatorError::TimelockNotElapsed))
+        );
+        assert!(h.coord.get_pending_upgrade().is_some());
+    }
+
+    #[test]
+    fn test_propose_upgrade_twice_fails() {
+        let h = setup();
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        h.coord.propose_upgrade(&hash);
+        assert_eq!(
+            h.coord.try_propose_upgrade(&hash),
+            Err(Ok(CoordinatorError::UpgradeAlreadyPending))
+        );
+    }
+
+    #[test]
+    fn test_cancel_upgrade_clears_pending_proposal() {
+        let h = setup();
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        h.coord.propose_upgrade(&hash);
+        h.coord.cancel_upgrade();
+
+        assert!(h.coord.get_pending_upgrade().is_none());
+        assert_eq!(
+            h.coord.try_execute_upgrade(),
+            Err(Ok(CoordinatorError::NoPendingUpgrade))
+        );
+    }
+
+    #[test]
+    fn test_migrate_double_run_guard() {
+        let h = setup();
+
+        // Simulate storage written by an older binary (schema 0 < target).
+        let coord_id = h.env.register(CoordinatorContract, ());
+        let coord = CoordinatorContractClient::new(&h.env, &coord_id);
+        coord.initialize(&h.admin, &h.req_id, &h.inv_id, &h.pay_id);
+        h.env.as_contract(&coord_id, || {
+            h.env
+                .storage()
+                .instance()
+                .set(&crate::SCHEMA_VERSION_KEY, &0u32)
+        });
+
+        assert_eq!(coord.schema_version(), 0);
+        assert_eq!(coord.migrate(), TARGET_SCHEMA_VERSION);
+        assert_eq!(
+            coord.try_migrate(),
+            Err(Ok(CoordinatorError::MigrationAlreadyApplied))
+        );
+    }
+
+    // ── Cross-contract version compatibility gate ─────────────────────────────
+
+    #[contract]
+    struct MockIncompatibleContract;
+
+    #[contractimpl]
+    impl MockIncompatibleContract {
+        pub fn version() -> u32 {
+            999
+        }
+    }
+
+    /// A version-mismatched domain contract must fail the workflow with a
+    /// distinct error before any state change.
+    #[test]
+    fn test_version_mismatched_domain_contract_fails_closed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+
+        // The requests contract reports an unsupported code version.
+        let req_id = env.register(MockIncompatibleContract, ());
+        let inv_id = env.register(MockInventoryContract, ());
+        let pay_id = env.register(MockPaymentContract, ());
+        let coord_id = env.register(CoordinatorContract, ());
+        MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
+
+        let coord = CoordinatorContractClient::new(&env, &coord_id);
+        coord.initialize(&admin, &req_id, &inv_id, &pay_id);
+
+        let result = coord.try_allocate_units(&1u64, &vec![&env, 1u64], &1u64, &admin);
+        assert_eq!(
+            result,
+            Err(Ok(CoordinatorError::IncompatibleContractVersion))
+        );
+
+        // Fail-closed: no workflow was created.
+        assert!(coord.try_get_workflow(&1u64).is_err());
+    }
+
+    /// A contract that does not expose `version()` at all must also fail
+    /// closed rather than mis-execute.
+    #[contract]
+    struct MockVersionlessContract;
+
+    #[contractimpl]
+    impl MockVersionlessContract {
+        pub fn noop() {}
+    }
+
+    #[test]
+    fn test_versionless_domain_contract_fails_closed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+
+        let req_id = env.register(MockVersionlessContract, ());
+        let inv_id = env.register(MockInventoryContract, ());
+        let pay_id = env.register(MockPaymentContract, ());
+        let coord_id = env.register(CoordinatorContract, ());
+        MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
+
+        let coord = CoordinatorContractClient::new(&env, &coord_id);
+        coord.initialize(&admin, &req_id, &inv_id, &pay_id);
+
+        let result = coord.try_allocate_units(&1u64, &vec![&env, 1u64], &1u64, &admin);
+        assert_eq!(
+            result,
+            Err(Ok(CoordinatorError::IncompatibleContractVersion))
+        );
+    }
+}
+
+/// Full upgrade rehearsal against the real compiled WASM: start a workflow,
+/// swap the coordinator binary mid-flight (propose → timelock → execute),
+/// then prove the in-flight workflow completes correctly on the new binary.
+///
+/// Requires the workspace WASMs to be built first — run via
+/// `scripts/test-upgrade-rehearsal.sh`.
+#[cfg(feature = "upgrade-rehearsal")]
+mod upgrade_rehearsal {
+    use super::*;
+    use soroban_sdk::testutils::Ledger as _;
+
+    const COORDINATOR_WASM: &[u8] = include_bytes!(
+        "../../../target/wasm32v1-none/release/coordinator_contract.wasm"
+    );
+
+    #[test]
+    fn test_upgrade_rehearsal_inflight_workflow_completes_after_upgrade() {
+        let h = setup();
+        h.env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        // Realistic in-flight state: an allocated (unsettled) workflow with
+        // reserved units and a locked payment.
+        seed_pending_request(&h, 1);
+        let unit_id = register_unit(&h);
+        let payment_id = create_locked_payment(&h, 1);
+        h.coord
+            .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+        assert_eq!(h.coord.get_workflow(&1u64).status, WorkflowStatus::Allocated);
+
+        // Propose → wait out the 48h timelock → execute the WASM swap.
+        let wasm_hash = h.env.deployer().upload_contract_wasm(COORDINATOR_WASM);
+        let executable_at = h.coord.propose_upgrade(&wasm_hash);
+        h.env.ledger().with_mut(|l| l.timestamp = executable_at + 1);
+        h.coord.execute_upgrade();
+
+        // Same contract ID, storage intact, new binary answering.
+        assert_eq!(h.coord.version(), crate::CONTRACT_VERSION);
+        let wf = h.coord.get_workflow(&1u64);
+        assert_eq!(wf.status, WorkflowStatus::Allocated);
+
+        // The in-flight workflow completes correctly post-upgrade.
+        h.coord.confirm_delivery(&1u64, &h.admin);
+        h.coord.settle_payment(&1u64, &h.admin);
+        assert_eq!(h.coord.get_workflow(&1u64).status, WorkflowStatus::Settled);
+
+        let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+        assert_eq!(payment.status, PaymentStatus::Released);
+    }
 }

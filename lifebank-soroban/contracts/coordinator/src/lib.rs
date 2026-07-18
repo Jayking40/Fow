@@ -262,6 +262,7 @@ impl CoordinatorContract {
         caller.require_auth();
         Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_compatible_domain_contracts(&env)?;
 
         if load_workflow(&env, request_id).is_some() {
             return Err(CoordinatorError::AlreadyDone);
@@ -342,6 +343,7 @@ impl CoordinatorContract {
         caller.require_auth();
         Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_compatible_domain_contracts(&env)?;
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
 
@@ -400,6 +402,7 @@ impl CoordinatorContract {
         caller.require_auth();
         Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_compatible_domain_contracts(&env)?;
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
 
@@ -525,6 +528,7 @@ impl CoordinatorContract {
         get_admin(&env).require_auth();
         Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_compatible_domain_contracts(&env)?;
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
 
@@ -593,6 +597,7 @@ impl CoordinatorContract {
         caller.require_auth();
         Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
+        Self::require_compatible_domain_contracts(&env)?;
 
         let pay_addr: Address = env
             .storage()
@@ -640,4 +645,200 @@ impl CoordinatorContract {
         }
         Ok(())
     }
+
+    /// Fail closed when any domain contract runs an unsupported code
+    /// version, so a partially-upgraded system never mis-executes (#31).
+    fn require_compatible_domain_contracts(env: &Env) -> Result<(), CoordinatorError> {
+        let requests: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequestContract)
+            .ok_or(CoordinatorError::NotInitialized)?;
+        let inventory: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InventoryContract)
+            .ok_or(CoordinatorError::NotInitialized)?;
+        let payments: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContract)
+            .ok_or(CoordinatorError::NotInitialized)?;
+        require_supported_version(env, &requests)?;
+        require_supported_version(env, &inventory)?;
+        require_supported_version(env, &payments)?;
+        Ok(())
+    }
+
+    // ── Timelocked upgradeability & versioned storage schema (#31) ───────────
+
+    /// Code version of the currently deployed binary.
+    pub fn version(_env: Env) -> u32 {
+        CONTRACT_VERSION
+    }
+
+    /// Storage schema version currently recorded on-chain (1 when unset).
+    pub fn schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&SCHEMA_VERSION_KEY)
+            .unwrap_or(1)
+    }
+
+    /// Propose replacing the running WASM. Admin only. This contract holds
+    /// (or orchestrates) escrowed funds, so the upgrade only becomes
+    /// executable after `UPGRADE_TIMELOCK_SECS` — it can never be swapped
+    /// instantly. Returns the ledger timestamp at which `execute_upgrade`
+    /// becomes callable.
+    pub fn propose_upgrade(
+        env: Env,
+        new_wasm_hash: soroban_sdk::BytesN<32>,
+    ) -> Result<u64, CoordinatorError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        admin.require_auth();
+        if env.storage().instance().has(&PENDING_UPGRADE_KEY) {
+            return Err(CoordinatorError::UpgradeAlreadyPending);
+        }
+        let now = env.ledger().timestamp();
+        let pending = PendingUpgrade {
+            new_wasm_hash,
+            proposed_at: now,
+            executable_at: now + UPGRADE_TIMELOCK_SECS,
+        };
+        env.storage().instance().set(&PENDING_UPGRADE_KEY, &pending);
+        env.events().publish(
+            (symbol_short!("upgrade"), symbol_short!("proposed")),
+            pending.executable_at,
+        );
+        Ok(pending.executable_at)
+    }
+
+    /// Cancel the pending upgrade proposal. Admin only.
+    pub fn cancel_upgrade(env: Env) -> Result<(), CoordinatorError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        admin.require_auth();
+        if !env.storage().instance().has(&PENDING_UPGRADE_KEY) {
+            return Err(CoordinatorError::NoPendingUpgrade);
+        }
+        env.storage().instance().remove(&PENDING_UPGRADE_KEY);
+        env.events()
+            .publish((symbol_short!("upgrade"), symbol_short!("canceled")), ());
+        Ok(())
+    }
+
+    /// The currently pending upgrade proposal, if any.
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&PENDING_UPGRADE_KEY)
+    }
+
+    /// Execute the proposed upgrade once its timelock has elapsed. Admin
+    /// only. The contract ID and all storage are preserved; call `migrate`
+    /// afterwards when the new binary bumps `TARGET_SCHEMA_VERSION`.
+    pub fn execute_upgrade(env: Env) -> Result<(), CoordinatorError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        admin.require_auth();
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&PENDING_UPGRADE_KEY)
+            .ok_or(CoordinatorError::NoPendingUpgrade)?;
+        if env.ledger().timestamp() < pending.executable_at {
+            return Err(CoordinatorError::TimelockNotElapsed);
+        }
+        env.storage().instance().remove(&PENDING_UPGRADE_KEY);
+        env.events()
+            .publish((symbol_short!("upgrade"), symbol_short!("executed")), ());
+        env.deployer().update_current_contract_wasm(pending.new_wasm_hash);
+        Ok(())
+    }
+
+    /// Apply version-gated storage migrations after an upgrade. Admin only.
+    /// Refuses to run once storage already sits at `TARGET_SCHEMA_VERSION`,
+    /// so a migration can never be applied twice.
+    pub fn migrate(env: Env) -> Result<u32, CoordinatorError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        admin.require_auth();
+        let current = Self::schema_version(env.clone());
+        if current >= TARGET_SCHEMA_VERSION {
+            return Err(CoordinatorError::MigrationAlreadyApplied);
+        }
+        // Version-gated transformations run here as the schema evolves, e.g.
+        // `if current < 2 { /* rewrite v1 entries into the v2 layout */ }`.
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
+        Ok(TARGET_SCHEMA_VERSION)
+    }
+}
+
+// ── Upgradeability & versioned storage schema (#31) ───────────────────────────
+//
+// Invariant: after an upgrade, the new binary must be able to read every
+// prior storage schema version until `migrate` has completed. Absence of the
+// stored schema version means schema 1.
+
+/// Code version compiled into this binary. Bump on every release.
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Storage schema version this binary writes. Bump only together with a
+/// version-gated transformation in `migrate`.
+pub const TARGET_SCHEMA_VERSION: u32 = 1;
+
+const SCHEMA_VERSION_KEY: soroban_sdk::Symbol = soroban_sdk::symbol_short!("SCHEMA_V");
+
+/// Delay between proposing and executing a WASM upgrade (48 hours). Applies
+/// because this contract participates in custody of escrowed donor funds.
+pub const UPGRADE_TIMELOCK_SECS: u64 = 172_800;
+
+const PENDING_UPGRADE_KEY: soroban_sdk::Symbol = soroban_sdk::symbol_short!("PEND_UPG");
+
+/// A queued WASM upgrade awaiting its timelock window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub new_wasm_hash: soroban_sdk::BytesN<32>,
+    pub proposed_at: u64,
+    pub executable_at: u64,
+}
+
+// ── Cross-contract version compatibility (#31) ────────────────────────────────
+
+/// Domain-contract code versions this coordinator can safely orchestrate.
+pub const MIN_SUPPORTED_DOMAIN_VERSION: u32 = 1;
+pub const MAX_SUPPORTED_DOMAIN_VERSION: u32 = 1;
+
+mod version_client {
+    use soroban_sdk::{contractclient, Env};
+
+    #[contractclient(name = "VersionedContractClient")]
+    pub trait VersionedContract {
+        fn version(env: Env) -> u32;
+    }
+}
+
+fn require_supported_version(env: &Env, contract: &Address) -> Result<(), CoordinatorError> {
+    let version = version_client::VersionedContractClient::new(env, contract)
+        .try_version()
+        .map_err(|_| CoordinatorError::IncompatibleContractVersion)?
+        .map_err(|_| CoordinatorError::IncompatibleContractVersion)?;
+    if !(MIN_SUPPORTED_DOMAIN_VERSION..=MAX_SUPPORTED_DOMAIN_VERSION).contains(&version) {
+        return Err(CoordinatorError::IncompatibleContractVersion);
+    }
+    Ok(())
 }
