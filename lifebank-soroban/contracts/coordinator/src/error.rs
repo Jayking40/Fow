@@ -13,6 +13,8 @@ pub enum CoordinatorError {
     WorkflowAlreadyStarted = 811,
     InvalidWorkflowState = 812,
     CannotRollbackSettled = 813,
+    AlreadyDone = 814,
+    WorkflowNotExpired = 815,
 
     // Cross-contract pre-condition failures
     RequestNotFound = 820,

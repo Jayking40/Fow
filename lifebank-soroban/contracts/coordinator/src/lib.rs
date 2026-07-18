@@ -142,6 +142,8 @@ use inventory_client::InventoryContractClient;
 use payment_client::PaymentContractClient;
 use request_client::RequestContractClient;
 
+const ALLOCATION_EXPIRY_SECONDS: u64 = 24 * 60 * 60;
+
 // ── Storage helpers ────────────────────────────────────────────────────────────
 
 fn get_admin(env: &Env) -> Address {
@@ -261,10 +263,8 @@ impl CoordinatorContract {
         Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
 
-        if let Some(wf) = load_workflow(&env, request_id) {
-            if wf.status != WorkflowStatus::Pending {
-                return Err(CoordinatorError::WorkflowAlreadyStarted);
-            }
+        if load_workflow(&env, request_id).is_some() {
+            return Err(CoordinatorError::AlreadyDone);
         }
 
         // Verify request is Pending
@@ -326,6 +326,7 @@ impl CoordinatorContract {
                 unit_ids,
                 status: WorkflowStatus::Allocated,
                 delivery_confirmed: false,
+                allocation_deadline: env.ledger().timestamp() + ALLOCATION_EXPIRY_SECONDS,
             },
         );
 
@@ -343,6 +344,10 @@ impl CoordinatorContract {
         Self::require_not_paused(&env)?;
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
+
+        if wf.status == WorkflowStatus::Delivered || wf.status == WorkflowStatus::Settled {
+            return Err(CoordinatorError::AlreadyDone);
+        }
 
         if wf.status != WorkflowStatus::Allocated {
             return Err(CoordinatorError::InvalidWorkflowState);
@@ -398,6 +403,10 @@ impl CoordinatorContract {
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
 
+        if wf.status == WorkflowStatus::Settled {
+            return Err(CoordinatorError::AlreadyDone);
+        }
+
         if !wf.delivery_confirmed || wf.status != WorkflowStatus::Delivered {
             return Err(CoordinatorError::DeliveryNotConfirmed);
         }
@@ -430,6 +439,79 @@ impl CoordinatorContract {
             (
                 symbol_short!("coord"),
                 symbol_short!("settld"),
+                symbol_short!("v1"),
+            ),
+            (request_id, wf.payment_id),
+        );
+
+        Ok(())
+    }
+
+    /// Expire an allocated workflow after its allocation deadline.
+    ///
+    /// Anyone can call this once the deadline has passed. The function releases
+    /// reserved units, refunds the locked payment, then marks the workflow
+    /// expired. Cross-contract errors are propagated so the host transaction
+    /// reverts instead of committing partial state.
+    pub fn expire_workflow(env: Env, request_id: u64) -> Result<(), CoordinatorError> {
+        Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
+
+        let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
+
+        if wf.status == WorkflowStatus::Expired {
+            return Err(CoordinatorError::AlreadyDone);
+        }
+
+        if wf.status != WorkflowStatus::Allocated {
+            return Err(CoordinatorError::InvalidWorkflowState);
+        }
+
+        if env.ledger().timestamp() < wf.allocation_deadline {
+            return Err(CoordinatorError::WorkflowNotExpired);
+        }
+
+        let inv_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InventoryContract)
+            .unwrap();
+        let inv_client = InventoryContractClient::new(&env, &inv_addr);
+        let inv_admin = inv_client.get_admin();
+        let reason = String::from_str(&env, "workflow_expired");
+
+        for i in 0..wf.unit_ids.len() {
+            let uid = wf.unit_ids.get(i).unwrap();
+            inv_client
+                .try_update_status(
+                    &uid,
+                    &BloodStatus::Available,
+                    &inv_admin,
+                    &Some(reason.clone()),
+                )
+                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?
+                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?;
+        }
+
+        let pay_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContract)
+            .unwrap();
+        let pay_client = PaymentContractClient::new(&env, &pay_addr);
+        pay_client
+            .try_update_status(&wf.payment_id, &PaymentStatus::Refunded)
+            .map_err(|_| CoordinatorError::PaymentUpdateFailed)?
+            .map_err(|_| CoordinatorError::PaymentUpdateFailed)?;
+
+        wf.status = WorkflowStatus::Expired;
+        wf.delivery_confirmed = false;
+        save_workflow(&env, &wf);
+
+        env.events().publish(
+            (
+                symbol_short!("coord"),
+                symbol_short!("expird"),
                 symbol_short!("v1"),
             ),
             (request_id, wf.payment_id),
