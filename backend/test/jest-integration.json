@@ -1,0 +1,14 @@
+
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "..",
+  "testEnvironment": "node",
+  "testRegex": ".integration.spec.ts$",
+  "transform": {
+    "^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": "<rootDir>/tsconfig.spec.json" }]
+  },
+  "globalSetup": "<rootDir>/test/jest-global-setup.ts",
+  "globalTeardown": "<rootDir>/test/jest-global-teardown.ts",
+  "setupFilesAfterEnv": [],
+  "testTimeout": 60000
+}
