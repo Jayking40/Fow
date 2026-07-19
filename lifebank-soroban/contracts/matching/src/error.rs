@@ -19,4 +19,7 @@ pub enum MatchingError {
 
     // Circuit breaker (630)
     ContractPaused = 630,
+
+    // Upgrade lifecycle (640)
+    MigrationAlreadyApplied = 640,
 }

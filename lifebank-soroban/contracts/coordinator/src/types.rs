@@ -14,6 +14,8 @@ pub enum WorkflowStatus {
     Settled,
     /// Workflow rolled back; units released, payment refunded.
     RolledBack,
+    /// Workflow expired after allocation deadline; units released, payment refunded.
+    Expired,
 }
 
 /// Per-request workflow record stored in the coordinator.
@@ -29,6 +31,8 @@ pub struct WorkflowRecord {
     pub unit_ids: Vec<u64>,
     pub status: WorkflowStatus,
     pub delivery_confirmed: bool,
+    /// Ledger timestamp after which an allocated workflow can be expired.
+    pub allocation_deadline: u64,
 }
 
 /// Summary of a sustained temperature excursion (mirrors temperature contract type).

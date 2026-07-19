@@ -1658,3 +1658,46 @@ fn test_batch_register_blood_unauthorized_bank() {
     let entries = vec![&env, (BloodType::APositive, 450u32, None::<Address>)];
     client.batch_register_blood(&unauthorized, &entries);
 }
+
+// ── Upgradeability & versioned schema (#31) ────────────────────────────────────
+
+#[test]
+fn test_version_and_default_schema_version() {
+    let (_env, _admin, client, _cid) = create_test_contract();
+    assert_eq!(client.version(), crate::CONTRACT_VERSION);
+    assert_eq!(client.schema_version(), 1);
+}
+
+#[test]
+fn test_upgrade_requires_initialized_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let cid = env.register(InventoryContract, ());
+    let client = InventoryContractClient::new(&env, &cid);
+
+    // No admin stored yet — upgrade must be refused.
+    let hash = soroban_sdk::BytesN::from_array(&env, &[3u8; 32]);
+    assert_eq!(
+        client.try_upgrade(&hash),
+        Err(Ok(crate::error::ContractError::Unauthorized))
+    );
+}
+
+#[test]
+fn test_migrate_double_run_guard() {
+    let (env, _admin, client, cid) = create_test_contract();
+
+    // Simulate storage written by an older binary (schema 0 < target).
+    env.as_contract(&cid, || {
+        env.storage()
+            .instance()
+            .set(&crate::SCHEMA_VERSION_KEY, &0u32)
+    });
+    assert_eq!(client.schema_version(), 0);
+
+    assert_eq!(client.migrate(), crate::TARGET_SCHEMA_VERSION);
+    assert_eq!(
+        client.try_migrate(),
+        Err(Ok(crate::error::ContractError::MigrationAlreadyApplied))
+    );
+}

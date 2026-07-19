@@ -16,16 +16,7 @@ pub enum Error {
     AlreadyInitialized = 700,
     NotInitialized = 701,
     DeliveryNotFound = 702,
-    ProofAlreadySubmitted = 703,
-    ProofNotFound = 704,
-    ProofAlreadyConfirmed = 705,
-    HashMismatch = 706,
-    ConfirmationWindowExpired = 707,
-    ConfirmationWindowNotExpired = 708,
-    MissingRequiredProof = 709,
-    CourierEqualsFacility = 710,
-    UnauthorizedFacility = 711,
-    InvalidConfirmationWindow = 712,
+    MigrationAlreadyApplied = 703,
 }
 
 #[contracttype]
@@ -203,211 +194,71 @@ impl DeliveryContract {
             .ok_or(Error::DeliveryNotFound)
     }
 
-    /// Ledgers the facility has to confirm a submitted proof.
-    pub fn get_confirmation_window(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::ConfirmationWindow)
-            .unwrap_or(DEFAULT_CONFIRMATION_WINDOW_LEDGERS)
+    // ── Upgradeability & versioned storage schema (#31) ──────────────────────
+
+    /// Code version of the currently deployed binary.
+    pub fn version(_env: Env) -> u32 {
+        CONTRACT_VERSION
     }
 
-    #[allow(deprecated)] // events pending migration to #[contractevent]
-    pub fn set_confirmation_window(env: Env, window_ledgers: u32) -> Result<(), Error> {
-        let admin = Self::get_admin(env.clone())?;
-        admin.require_auth();
-        if window_ledgers == 0 {
-            return Err(Error::InvalidConfirmationWindow);
-        }
-
+    /// Storage schema version currently recorded on-chain (1 when unset).
+    pub fn schema_version(env: Env) -> u32 {
         env.storage()
             .instance()
-            .set(&DataKey::ConfirmationWindow, &window_ledgers);
-
-        env.events().publish(
-            (symbol_short!("cfg_win"), symbol_short!("v1")),
-            window_ledgers,
-        );
-
-        Ok(())
+            .get(&SCHEMA_VERSION_KEY)
+            .unwrap_or(1)
     }
 
-    #[allow(deprecated)] // events pending migration to #[contractevent]
-    pub fn set_proof_requirements(env: Env, requirements: ProofRequirements) -> Result<(), Error> {
-        let admin = Self::get_admin(env.clone())?;
-        admin.require_auth();
-
-        env.storage()
-            .instance()
-            .set(&DataKey::ProofRequirements, &requirements);
-
-        env.events().publish(
-            (symbol_short!("cfg_req"), symbol_short!("v1")),
-            requirements,
-        );
-
-        Ok(())
-    }
-
-    /// Phase 1 of two-phase confirmation: the courier commits to the hash of
-    /// the off-chain evidence bundle. `declared_proofs` states which proof
-    /// artifacts the bundle contains; every proof required by the configured
-    /// `ProofRequirements` must be declared.
-    #[allow(deprecated)] // events pending migration to #[contractevent]
-    pub fn submit_proof(
-        env: Env,
-        courier: Address,
-        facility: Address,
-        delivery_id: u64,
-        bundle_hash: BytesN<32>,
-        declared_proofs: ProofRequirements,
-    ) -> Result<(), Error> {
-        courier.require_auth();
-
-        let required = Self::get_proof_requirements(env.clone())?;
-        if courier == facility {
-            return Err(Error::CourierEqualsFacility);
-        }
-        if env
+    /// Replace the running WASM with an already-installed hash. Admin only.
+    /// The contract ID and all storage are preserved; call `migrate` after
+    /// the upgrade when the new binary bumps `TARGET_SCHEMA_VERSION`.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), Error> {
+        let admin: Address = env
             .storage()
-            .persistent()
-            .has(&DataKey::ProofCommitment(delivery_id))
-        {
-            return Err(Error::ProofAlreadySubmitted);
-        }
-        if (required.requires_photo_proof && !declared_proofs.requires_photo_proof)
-            || (required.requires_recipient_signature
-                && !declared_proofs.requires_recipient_signature)
-            || (required.requires_temperature_log && !declared_proofs.requires_temperature_log)
-        {
-            return Err(Error::MissingRequiredProof);
-        }
-
-        let commitment = ProofCommitment {
-            delivery_id,
-            bundle_hash: bundle_hash.clone(),
-            courier: courier.clone(),
-            facility: facility.clone(),
-            submitted_at: env.ledger().sequence() as u64,
-            confirmed_at: None,
-            status: DeliveryStatus::Submitted,
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::ProofCommitment(delivery_id), &commitment);
-
-        env.events().publish(
-            (symbol_short!("submit"), symbol_short!("v1")),
-            (delivery_id, bundle_hash, courier, facility),
-        );
-
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
-    /// Phase 2: the receiving facility independently confirms the delivery by
-    /// presenting the exact bundle hash it verified off-chain. A mismatch is a
-    /// distinct, retryable error that leaves the submission open. Confirmation
-    /// must land within the configured window (inclusive) of submission.
-    #[allow(deprecated)] // events pending migration to #[contractevent]
-    pub fn confirm_receipt(
-        env: Env,
-        facility: Address,
-        delivery_id: u64,
-        bundle_hash: BytesN<32>,
-    ) -> Result<(), Error> {
-        facility.require_auth();
-
-        let mut commitment = Self::get_proof_commitment(env.clone(), delivery_id)?;
-        if facility != commitment.facility {
-            return Err(Error::UnauthorizedFacility);
+    /// Apply version-gated storage migrations after an upgrade. Admin only.
+    /// Refuses to run once storage already sits at `TARGET_SCHEMA_VERSION`,
+    /// so a migration can never be applied twice.
+    pub fn migrate(env: Env) -> Result<u32, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        let current = Self::schema_version(env.clone());
+        if current >= TARGET_SCHEMA_VERSION {
+            return Err(Error::MigrationAlreadyApplied);
         }
-        match commitment.status {
-            DeliveryStatus::Confirmed => return Err(Error::ProofAlreadyConfirmed),
-            DeliveryStatus::ContestableTimeout => return Err(Error::ConfirmationWindowExpired),
-            DeliveryStatus::Submitted => {}
-        }
-
-        let now = env.ledger().sequence() as u64;
-        let deadline = commitment.submitted_at + Self::get_confirmation_window(env.clone()) as u64;
-        if now > deadline {
-            return Err(Error::ConfirmationWindowExpired);
-        }
-
-        if bundle_hash != commitment.bundle_hash {
-            // Diagnostic only: a returned error rolls the event back on-chain,
-            // but it surfaces in simulation traces.
-            env.events().publish(
-                (symbol_short!("mismatch"), symbol_short!("v1")),
-                (delivery_id, bundle_hash, facility),
-            );
-            return Err(Error::HashMismatch);
-        }
-
-        commitment.confirmed_at = Some(now);
-        commitment.status = DeliveryStatus::Confirmed;
+        // Version-gated transformations run here as the schema evolves, e.g.
+        // `if current < 2 { /* rewrite v1 entries into the v2 layout */ }`.
         env.storage()
-            .persistent()
-            .set(&DataKey::ProofCommitment(delivery_id), &commitment);
-
-        env.events().publish(
-            (symbol_short!("confirm"), symbol_short!("v1")),
-            (delivery_id, bundle_hash, facility),
-        );
-
-        Ok(())
-    }
-
-    /// Persist the timeout transition once the confirmation window has passed
-    /// without facility confirmation. Callable by anyone — expiry is an
-    /// objective ledger fact — and leaves the delivery contestable rather than
-    /// confirmed or silently failed.
-    #[allow(deprecated)] // events pending migration to #[contractevent]
-    pub fn mark_timeout(env: Env, delivery_id: u64) -> Result<(), Error> {
-        let mut commitment = Self::get_proof_commitment(env.clone(), delivery_id)?;
-        match commitment.status {
-            DeliveryStatus::Confirmed => return Err(Error::ProofAlreadyConfirmed),
-            DeliveryStatus::ContestableTimeout => return Err(Error::ConfirmationWindowExpired),
-            DeliveryStatus::Submitted => {}
-        }
-
-        let now = env.ledger().sequence() as u64;
-        let deadline = commitment.submitted_at + Self::get_confirmation_window(env.clone()) as u64;
-        if now <= deadline {
-            return Err(Error::ConfirmationWindowNotExpired);
-        }
-
-        commitment.status = DeliveryStatus::ContestableTimeout;
-        env.storage()
-            .persistent()
-            .set(&DataKey::ProofCommitment(delivery_id), &commitment);
-
-        env.events().publish(
-            (symbol_short!("timeout"), symbol_short!("v1")),
-            (delivery_id, commitment.bundle_hash, commitment.courier),
-        );
-
-        Ok(())
-    }
-
-    pub fn get_proof_commitment(env: Env, delivery_id: u64) -> Result<ProofCommitment, Error> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ProofCommitment(delivery_id))
-            .ok_or(Error::ProofNotFound)
-    }
-
-    /// Effective status: reports `ContestableTimeout` for an expired-but-not-
-    /// yet-marked submission so readers never see a stale `Submitted`.
-    pub fn get_delivery_status(env: Env, delivery_id: u64) -> Result<DeliveryStatus, Error> {
-        let commitment = Self::get_proof_commitment(env.clone(), delivery_id)?;
-        if commitment.status == DeliveryStatus::Submitted {
-            let deadline =
-                commitment.submitted_at + Self::get_confirmation_window(env.clone()) as u64;
-            if (env.ledger().sequence() as u64) > deadline {
-                return Ok(DeliveryStatus::ContestableTimeout);
-            }
-        }
-        Ok(commitment.status)
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
+        Ok(TARGET_SCHEMA_VERSION)
     }
 }
 
 mod test;
+
+// ── Upgradeability & versioned storage schema (#31) ───────────────────────────
+//
+// Invariant: after an upgrade, the new binary must be able to read every
+// prior storage schema version until `migrate` has completed. Absence of the
+// stored schema version means schema 1.
+
+/// Code version compiled into this binary. Bump on every release.
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Storage schema version this binary writes. Bump only together with a
+/// version-gated transformation in `migrate`.
+pub const TARGET_SCHEMA_VERSION: u32 = 1;
+
+const SCHEMA_VERSION_KEY: soroban_sdk::Symbol = soroban_sdk::symbol_short!("SCHEMA_V");

@@ -7,7 +7,9 @@
 //! drives the full request → allocation → delivery → settlement sequence.
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, testutils::Address as _, vec, Address, Env, String, Vec,
+    contract, contractimpl, contracttype,
+    testutils::{Address as _, Ledger},
+    vec, Address, Env, String, Vec,
 };
 
 use super::{
@@ -28,6 +30,10 @@ struct MockRequestContract;
 
 #[contractimpl]
 impl MockRequestContract {
+    pub fn version() -> u32 {
+        1
+    }
+
     pub fn seed_request(env: Env, id: u64, status: RequestStatus) {
         env.storage()
             .persistent()
@@ -49,6 +55,7 @@ enum InvKey {
     Unit(u64),
     Admin,
     Counter,
+    FailUpdateUnit(u64),
 }
 
 #[contract]
@@ -56,6 +63,10 @@ struct MockInventoryContract;
 
 #[contractimpl]
 impl MockInventoryContract {
+    pub fn version() -> u32 {
+        1
+    }
+
     pub fn initialize(env: Env, admin: Address) {
         env.storage().instance().set(&InvKey::Admin, &admin);
         env.storage().instance().set(&InvKey::Counter, &0u64);
@@ -90,6 +101,12 @@ impl MockInventoryContract {
             .unwrap()
     }
 
+    pub fn fail_update_for_unit(env: Env, unit_id: u64) {
+        env.storage()
+            .persistent()
+            .set(&InvKey::FailUpdateUnit(unit_id), &true);
+    }
+
     pub fn update_status(
         env: Env,
         unit_id: u64,
@@ -97,13 +114,24 @@ impl MockInventoryContract {
         _authorized_by: Address,
         _reason: Option<String>,
     ) -> BloodUnit {
+        if env
+            .storage()
+            .persistent()
+            .get(&InvKey::FailUpdateUnit(unit_id))
+            .unwrap_or(false)
+        {
+            panic!("forced inventory update failure");
+        }
+
         let mut unit: BloodUnit = env
             .storage()
             .persistent()
             .get(&InvKey::Unit(unit_id))
             .unwrap();
         unit.status = new_status;
-        env.storage().persistent().set(&InvKey::Unit(unit_id), &unit);
+        env.storage()
+            .persistent()
+            .set(&InvKey::Unit(unit_id), &unit);
         unit
     }
 
@@ -113,7 +141,13 @@ impl MockInventoryContract {
         authorized_by: Address,
         delivery_location: String,
     ) -> BloodUnit {
-        Self::update_status(env, unit_id, BloodStatus::Delivered, authorized_by, Some(delivery_location))
+        Self::update_status(
+            env,
+            unit_id,
+            BloodStatus::Delivered,
+            authorized_by,
+            Some(delivery_location),
+        )
     }
 }
 
@@ -123,6 +157,7 @@ impl MockInventoryContract {
 enum PayKey {
     Payment(u64),
     Counter,
+    FailUpdates,
 }
 
 #[contract]
@@ -130,6 +165,10 @@ struct MockPaymentContract;
 
 #[contractimpl]
 impl MockPaymentContract {
+    pub fn version() -> u32 {
+        1
+    }
+
     pub fn create_payment(env: Env, request_id: u64, status: PaymentStatus) -> u64 {
         let id: u64 = env
             .storage()
@@ -140,7 +179,11 @@ impl MockPaymentContract {
         env.storage().instance().set(&PayKey::Counter, &id);
         env.storage().persistent().set(
             &PayKey::Payment(id),
-            &Payment { id, request_id, status },
+            &Payment {
+                id,
+                request_id,
+                status,
+            },
         );
         id
     }
@@ -152,7 +195,20 @@ impl MockPaymentContract {
             .unwrap()
     }
 
+    pub fn fail_updates(env: Env) {
+        env.storage().persistent().set(&PayKey::FailUpdates, &true);
+    }
+
     pub fn update_status(env: Env, payment_id: u64, status: PaymentStatus) {
+        if env
+            .storage()
+            .persistent()
+            .get(&PayKey::FailUpdates)
+            .unwrap_or(false)
+        {
+            panic!("forced payment update failure");
+        }
+
         let mut p: Payment = env
             .storage()
             .persistent()
@@ -164,7 +220,12 @@ impl MockPaymentContract {
             .set(&PayKey::Payment(payment_id), &p);
     }
 
-    pub fn record_dispute(env: Env, payment_id: u64, _reason: super::payment_client::DisputeReason, _case_id: String) {
+    pub fn record_dispute(
+        env: Env,
+        payment_id: u64,
+        _reason: super::payment_client::DisputeReason,
+        _case_id: String,
+    ) {
         let mut p: Payment = env
             .storage()
             .persistent()
@@ -206,12 +267,18 @@ fn setup<'a>() -> Harness<'a> {
     let coord = CoordinatorContractClient::new(&env, &coord_id);
     coord.initialize(&admin, &req_id, &inv_id, &pay_id);
 
-    Harness { env, admin, coord, req_id, inv_id, pay_id }
+    Harness {
+        env,
+        admin,
+        coord,
+        req_id,
+        inv_id,
+        pay_id,
+    }
 }
 
 fn seed_pending_request(h: &Harness, id: u64) {
-    MockRequestContractClient::new(&h.env, &h.req_id)
-        .seed_request(&id, &RequestStatus::Pending);
+    MockRequestContractClient::new(&h.env, &h.req_id).seed_request(&id, &RequestStatus::Pending);
 }
 
 fn register_unit(h: &Harness) -> u64 {
@@ -232,7 +299,8 @@ fn test_full_happy_path() {
     let unit_id = register_unit(&h);
     let payment_id = create_locked_payment(&h, 1);
 
-    h.coord.allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
 
     let wf = h.coord.get_workflow(&1u64);
     assert_eq!(wf.status, WorkflowStatus::Allocated);
@@ -268,7 +336,8 @@ fn test_settle_blocked_without_delivery() {
     let unit_id = register_unit(&h);
     let payment_id = create_locked_payment(&h, 1);
 
-    h.coord.allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
 
     let result = h.coord.try_settle_payment(&1u64, &h.admin);
     assert_eq!(result, Err(Ok(CoordinatorError::DeliveryNotConfirmed)));
@@ -284,16 +353,205 @@ fn test_double_allocation_blocked() {
     let unit_id = register_unit(&h);
     let payment_id = create_locked_payment(&h, 1);
 
-    h.coord.allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
 
     let unit_id2 = register_unit(&h);
-    let result = h.coord.try_allocate_units(
+    let result = h
+        .coord
+        .try_allocate_units(&1u64, &vec![&h.env, unit_id2], &payment_id, &h.admin);
+    assert_eq!(result, Err(Ok(CoordinatorError::AlreadyDone)));
+
+    let wf = h.coord.get_workflow(&1u64);
+    assert_eq!(wf.status, WorkflowStatus::Allocated);
+    assert!(!wf.delivery_confirmed);
+}
+
+#[test]
+fn test_confirm_delivery_is_idempotent_after_delivery() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord.confirm_delivery(&1u64, &h.admin);
+
+    let before = h.coord.get_workflow(&1u64);
+    let result = h.coord.try_confirm_delivery(&1u64, &h.admin);
+    assert_eq!(result, Err(Ok(CoordinatorError::AlreadyDone)));
+
+    let after = h.coord.get_workflow(&1u64);
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.delivery_confirmed, before.delivery_confirmed);
+    assert_eq!(after.allocation_deadline, before.allocation_deadline);
+
+    let unit = MockInventoryContractClient::new(&h.env, &h.inv_id).get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Delivered);
+}
+
+#[test]
+fn test_settle_payment_is_idempotent_after_settlement() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord.confirm_delivery(&1u64, &h.admin);
+    h.coord.settle_payment(&1u64, &h.admin);
+
+    let before = h.coord.get_workflow(&1u64);
+    let result = h.coord.try_settle_payment(&1u64, &h.admin);
+    assert_eq!(result, Err(Ok(CoordinatorError::AlreadyDone)));
+
+    let after = h.coord.get_workflow(&1u64);
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.delivery_confirmed, before.delivery_confirmed);
+
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Released);
+}
+
+#[test]
+fn test_expire_workflow_rejects_before_deadline() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+
+    let result = h.coord.try_expire_workflow(&1u64);
+    assert_eq!(result, Err(Ok(CoordinatorError::WorkflowNotExpired)));
+
+    let wf = h.coord.get_workflow(&1u64);
+    assert_eq!(wf.status, WorkflowStatus::Allocated);
+}
+
+#[test]
+fn test_expire_workflow_releases_units_refunds_payment_and_marks_expired() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    let wf = h.coord.get_workflow(&1u64);
+    h.env.ledger().with_mut(|li| {
+        li.timestamp = wf.allocation_deadline + 1;
+    });
+
+    h.coord.expire_workflow(&1u64);
+
+    let wf = h.coord.get_workflow(&1u64);
+    assert_eq!(wf.status, WorkflowStatus::Expired);
+    assert!(!wf.delivery_confirmed);
+
+    let unit = MockInventoryContractClient::new(&h.env, &h.inv_id).get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Available);
+
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Refunded);
+}
+
+#[test]
+fn test_expire_workflow_is_idempotent_after_expiry() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    let wf = h.coord.get_workflow(&1u64);
+    h.env.ledger().with_mut(|li| {
+        li.timestamp = wf.allocation_deadline + 1;
+    });
+
+    h.coord.expire_workflow(&1u64);
+    let result = h.coord.try_expire_workflow(&1u64);
+    assert_eq!(result, Err(Ok(CoordinatorError::AlreadyDone)));
+
+    let unit = MockInventoryContractClient::new(&h.env, &h.inv_id).get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Available);
+
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Refunded);
+}
+
+#[test]
+fn test_expire_workflow_inventory_failure_leaves_no_partial_state() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let first_unit_id = register_unit(&h);
+    let second_unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+
+    h.coord.allocate_units(
         &1u64,
-        &vec![&h.env, unit_id2],
+        &vec![&h.env, first_unit_id, second_unit_id],
         &payment_id,
         &h.admin,
     );
-    assert_eq!(result, Err(Ok(CoordinatorError::WorkflowAlreadyStarted)));
+    let wf = h.coord.get_workflow(&1u64);
+    h.env.ledger().with_mut(|li| {
+        li.timestamp = wf.allocation_deadline + 1;
+    });
+
+    MockInventoryContractClient::new(&h.env, &h.inv_id).fail_update_for_unit(&second_unit_id);
+
+    let result = h.coord.try_expire_workflow(&1u64);
+    assert!(result.is_err());
+
+    let wf = h.coord.get_workflow(&1u64);
+    assert_eq!(wf.status, WorkflowStatus::Allocated);
+
+    let inv = MockInventoryContractClient::new(&h.env, &h.inv_id);
+    assert_eq!(
+        inv.get_blood_unit(&first_unit_id).status,
+        BloodStatus::Reserved
+    );
+    assert_eq!(
+        inv.get_blood_unit(&second_unit_id).status,
+        BloodStatus::Reserved
+    );
+
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Locked);
+}
+
+#[test]
+fn test_expire_workflow_payment_failure_leaves_no_partial_state() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    let wf = h.coord.get_workflow(&1u64);
+    h.env.ledger().with_mut(|li| {
+        li.timestamp = wf.allocation_deadline + 1;
+    });
+
+    MockPaymentContractClient::new(&h.env, &h.pay_id).fail_updates();
+
+    let result = h.coord.try_expire_workflow(&1u64);
+    assert!(result.is_err());
+
+    let wf = h.coord.get_workflow(&1u64);
+    assert_eq!(wf.status, WorkflowStatus::Allocated);
+
+    let unit = MockInventoryContractClient::new(&h.env, &h.inv_id).get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Reserved);
+
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Locked);
 }
 
 #[test]
@@ -304,15 +562,16 @@ fn test_allocate_blocked_for_unavailable_unit() {
     let payment_id = create_locked_payment(&h, 1);
 
     // Pre-reserve the unit
-    MockInventoryContractClient::new(&h.env, &h.inv_id)
-        .update_status(&unit_id, &BloodStatus::Reserved, &h.admin, &None);
-
-    let result = h.coord.try_allocate_units(
-        &1u64,
-        &vec![&h.env, unit_id],
-        &payment_id,
+    MockInventoryContractClient::new(&h.env, &h.inv_id).update_status(
+        &unit_id,
+        &BloodStatus::Reserved,
         &h.admin,
+        &None,
     );
+
+    let result = h
+        .coord
+        .try_allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     assert_eq!(result, Err(Ok(CoordinatorError::UnitNotAvailable)));
 }
 
@@ -325,7 +584,8 @@ fn test_settle_blocked_for_pending_payment() {
     let payment_id = MockPaymentContractClient::new(&h.env, &h.pay_id)
         .create_payment(&1u64, &PaymentStatus::Pending);
 
-    h.coord.allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     h.coord.confirm_delivery(&1u64, &h.admin);
 
     let result = h.coord.try_settle_payment(&1u64, &h.admin);
@@ -343,17 +603,13 @@ fn test_confirm_delivery_blocked_before_allocation() {
 fn test_allocate_blocked_for_non_pending_request() {
     let h = setup();
     // Seed request with Approved status (not Pending)
-    MockRequestContractClient::new(&h.env, &h.req_id)
-        .seed_request(&1u64, &RequestStatus::Approved);
+    MockRequestContractClient::new(&h.env, &h.req_id).seed_request(&1u64, &RequestStatus::Approved);
     let unit_id = register_unit(&h);
     let payment_id = create_locked_payment(&h, 1);
 
-    let result = h.coord.try_allocate_units(
-        &1u64,
-        &vec![&h.env, unit_id],
-        &payment_id,
-        &h.admin,
-    );
+    let result = h
+        .coord
+        .try_allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     assert_eq!(result, Err(Ok(CoordinatorError::InvalidRequestState)));
 }
 
@@ -366,7 +622,8 @@ fn test_rollback_releases_units_and_refunds_payment() {
     let unit_id = register_unit(&h);
     let payment_id = create_locked_payment(&h, 1);
 
-    h.coord.allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     h.coord.rollback(&1u64);
 
     let wf = h.coord.get_workflow(&1u64);
@@ -386,7 +643,8 @@ fn test_rollback_blocked_after_settlement() {
     let unit_id = register_unit(&h);
     let payment_id = create_locked_payment(&h, 1);
 
-    h.coord.allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     h.coord.confirm_delivery(&1u64, &h.admin);
     h.coord.settle_payment(&1u64, &h.admin);
 
@@ -406,7 +664,9 @@ fn test_coordinator_pause_blocks_allocate_units() {
     let unit_id = register_unit(&h);
     let pay_id = create_locked_payment(&h, 1);
 
-    let result = h.coord.try_allocate_units(&1u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
+    let result = h
+        .coord
+        .try_allocate_units(&1u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
     assert!(result.is_err());
 }
 
@@ -418,7 +678,8 @@ fn test_coordinator_pause_allows_get_workflow() {
     seed_pending_request(&h, 10);
     let unit_id = register_unit(&h);
     let pay_id = create_locked_payment(&h, 10);
-    h.coord.allocate_units(&10u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
+    h.coord
+        .allocate_units(&10u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
 
     h.coord.pause(&h.admin);
 
@@ -437,8 +698,12 @@ fn test_coordinator_unpause_restores_writes() {
     seed_pending_request(&h, 20);
     let unit_id = register_unit(&h);
     let pay_id = create_locked_payment(&h, 20);
-    h.coord.allocate_units(&20u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
-    assert_eq!(h.coord.get_workflow(&20u64).status, WorkflowStatus::Allocated);
+    h.coord
+        .allocate_units(&20u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
+    assert_eq!(
+        h.coord.get_workflow(&20u64).status,
+        WorkflowStatus::Allocated
+    );
 }
 
 #[test]
@@ -530,4 +795,220 @@ fn test_flag_temperature_breach_blocked_when_paused() {
     // Payment must remain Locked
     let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Locked);
+}
+
+// ── Timelocked upgradeability, schema migration & version gates (#31) ─────────
+
+mod upgrade_tests {
+    use super::*;
+    use crate::{CONTRACT_VERSION, TARGET_SCHEMA_VERSION, UPGRADE_TIMELOCK_SECS};
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::{contract, contractimpl, BytesN};
+
+    #[test]
+    fn test_version_and_default_schema_version() {
+        let h = setup();
+        assert_eq!(h.coord.version(), CONTRACT_VERSION);
+        assert_eq!(h.coord.schema_version(), 1);
+    }
+
+    #[test]
+    fn test_propose_upgrade_queues_behind_timelock() {
+        let h = setup();
+        h.env.ledger().with_mut(|l| l.timestamp = 10_000);
+
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        let executable_at = h.coord.propose_upgrade(&hash);
+        assert_eq!(executable_at, 10_000 + UPGRADE_TIMELOCK_SECS);
+
+        let pending = h.coord.get_pending_upgrade().unwrap();
+        assert_eq!(pending.new_wasm_hash, hash);
+        assert_eq!(pending.executable_at, executable_at);
+    }
+
+    #[test]
+    fn test_execute_upgrade_before_timelock_elapses_fails() {
+        let h = setup();
+        h.env.ledger().with_mut(|l| l.timestamp = 10_000);
+
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        let executable_at = h.coord.propose_upgrade(&hash);
+
+        h.env.ledger().with_mut(|l| l.timestamp = executable_at - 1);
+        assert_eq!(
+            h.coord.try_execute_upgrade(),
+            Err(Ok(CoordinatorError::TimelockNotElapsed))
+        );
+        assert!(h.coord.get_pending_upgrade().is_some());
+    }
+
+    #[test]
+    fn test_propose_upgrade_twice_fails() {
+        let h = setup();
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        h.coord.propose_upgrade(&hash);
+        assert_eq!(
+            h.coord.try_propose_upgrade(&hash),
+            Err(Ok(CoordinatorError::UpgradeAlreadyPending))
+        );
+    }
+
+    #[test]
+    fn test_cancel_upgrade_clears_pending_proposal() {
+        let h = setup();
+        let hash = BytesN::from_array(&h.env, &[9u8; 32]);
+        h.coord.propose_upgrade(&hash);
+        h.coord.cancel_upgrade();
+
+        assert!(h.coord.get_pending_upgrade().is_none());
+        assert_eq!(
+            h.coord.try_execute_upgrade(),
+            Err(Ok(CoordinatorError::NoPendingUpgrade))
+        );
+    }
+
+    #[test]
+    fn test_migrate_double_run_guard() {
+        let h = setup();
+
+        // Simulate storage written by an older binary (schema 0 < target).
+        let coord_id = h.env.register(CoordinatorContract, ());
+        let coord = CoordinatorContractClient::new(&h.env, &coord_id);
+        coord.initialize(&h.admin, &h.req_id, &h.inv_id, &h.pay_id);
+        h.env.as_contract(&coord_id, || {
+            h.env
+                .storage()
+                .instance()
+                .set(&crate::SCHEMA_VERSION_KEY, &0u32)
+        });
+
+        assert_eq!(coord.schema_version(), 0);
+        assert_eq!(coord.migrate(), TARGET_SCHEMA_VERSION);
+        assert_eq!(
+            coord.try_migrate(),
+            Err(Ok(CoordinatorError::MigrationAlreadyApplied))
+        );
+    }
+
+    // ── Cross-contract version compatibility gate ─────────────────────────────
+
+    #[contract]
+    struct MockIncompatibleContract;
+
+    #[contractimpl]
+    impl MockIncompatibleContract {
+        pub fn version() -> u32 {
+            999
+        }
+    }
+
+    /// A version-mismatched domain contract must fail the workflow with a
+    /// distinct error before any state change.
+    #[test]
+    fn test_version_mismatched_domain_contract_fails_closed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+
+        // The requests contract reports an unsupported code version.
+        let req_id = env.register(MockIncompatibleContract, ());
+        let inv_id = env.register(MockInventoryContract, ());
+        let pay_id = env.register(MockPaymentContract, ());
+        let coord_id = env.register(CoordinatorContract, ());
+        MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
+
+        let coord = CoordinatorContractClient::new(&env, &coord_id);
+        coord.initialize(&admin, &req_id, &inv_id, &pay_id);
+
+        let result = coord.try_allocate_units(&1u64, &vec![&env, 1u64], &1u64, &admin);
+        assert_eq!(
+            result,
+            Err(Ok(CoordinatorError::IncompatibleContractVersion))
+        );
+
+        // Fail-closed: no workflow was created.
+        assert!(coord.try_get_workflow(&1u64).is_err());
+    }
+
+    /// A contract that does not expose `version()` at all must also fail
+    /// closed rather than mis-execute.
+    #[contract]
+    struct MockVersionlessContract;
+
+    #[contractimpl]
+    impl MockVersionlessContract {
+        pub fn noop() {}
+    }
+
+    #[test]
+    fn test_versionless_domain_contract_fails_closed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+
+        let req_id = env.register(MockVersionlessContract, ());
+        let inv_id = env.register(MockInventoryContract, ());
+        let pay_id = env.register(MockPaymentContract, ());
+        let coord_id = env.register(CoordinatorContract, ());
+        MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
+
+        let coord = CoordinatorContractClient::new(&env, &coord_id);
+        coord.initialize(&admin, &req_id, &inv_id, &pay_id);
+
+        let result = coord.try_allocate_units(&1u64, &vec![&env, 1u64], &1u64, &admin);
+        assert_eq!(
+            result,
+            Err(Ok(CoordinatorError::IncompatibleContractVersion))
+        );
+    }
+}
+
+/// Full upgrade rehearsal against the real compiled WASM: start a workflow,
+/// swap the coordinator binary mid-flight (propose → timelock → execute),
+/// then prove the in-flight workflow completes correctly on the new binary.
+///
+/// Requires the workspace WASMs to be built first — run via
+/// `scripts/test-upgrade-rehearsal.sh`.
+#[cfg(feature = "upgrade-rehearsal")]
+mod upgrade_rehearsal {
+    use super::*;
+    use soroban_sdk::testutils::Ledger as _;
+
+    const COORDINATOR_WASM: &[u8] = include_bytes!(
+        "../../../target/wasm32v1-none/release/coordinator_contract.wasm"
+    );
+
+    #[test]
+    fn test_upgrade_rehearsal_inflight_workflow_completes_after_upgrade() {
+        let h = setup();
+        h.env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+        // Realistic in-flight state: an allocated (unsettled) workflow with
+        // reserved units and a locked payment.
+        seed_pending_request(&h, 1);
+        let unit_id = register_unit(&h);
+        let payment_id = create_locked_payment(&h, 1);
+        h.coord
+            .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+        assert_eq!(h.coord.get_workflow(&1u64).status, WorkflowStatus::Allocated);
+
+        // Propose → wait out the 48h timelock → execute the WASM swap.
+        let wasm_hash = h.env.deployer().upload_contract_wasm(COORDINATOR_WASM);
+        let executable_at = h.coord.propose_upgrade(&wasm_hash);
+        h.env.ledger().with_mut(|l| l.timestamp = executable_at + 1);
+        h.coord.execute_upgrade();
+
+        // Same contract ID, storage intact, new binary answering.
+        assert_eq!(h.coord.version(), crate::CONTRACT_VERSION);
+        let wf = h.coord.get_workflow(&1u64);
+        assert_eq!(wf.status, WorkflowStatus::Allocated);
+
+        // The in-flight workflow completes correctly post-upgrade.
+        h.coord.confirm_delivery(&1u64, &h.admin);
+        h.coord.settle_payment(&1u64, &h.admin);
+        assert_eq!(h.coord.get_workflow(&1u64).status, WorkflowStatus::Settled);
+
+        let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+        assert_eq!(payment.status, PaymentStatus::Released);
+    }
 }
