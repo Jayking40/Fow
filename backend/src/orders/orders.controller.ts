@@ -20,10 +20,14 @@ import { Permission } from '../auth/enums/permission.enum';
 import { Auditable } from '../common/audit/auditable.decorator';
 import { AuditLogInterceptor } from '../common/audit/audit-log.interceptor';
 import { PaginatedResponse } from '../common/pagination';
+import { RequiresIdempotency } from '../common/idempotency/requires-idempotency.decorator';
+import { FeePreviewDto } from '../fee-policy/dto/fee-policy.dto';
 
 import { CreateOrderDto } from './dto/create-order.dto';
 import { OrderQueryParamsDto } from './dto/order-query-params.dto';
 import { UpdateRequestStatusDto } from './dto/update-request-status.dto';
+import { RaiseDisputeDto } from './dto/raise-dispute.dto';
+import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
 import { OrdersService } from './orders.service';
 import { OrderStateAuditService } from './services/order-state-audit.service';
 import { Order } from './types/order.types';
@@ -124,12 +128,12 @@ export class OrdersController {
 
   @RequirePermissions(Permission.VIEW_ORDER)
   @Post(':id/preview-fees')
-  previewOrderFees(@Param('id') id: string, @Body() previewData: any) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call
+  previewOrderFees(@Param('id') id: string, @Body() previewData: Partial<FeePreviewDto>) {
     return this.ordersService.previewOrderFees(id, previewData);
   }
 
   @RequirePermissions(Permission.CREATE_ORDER)
+  @RequiresIdempotency()
   @Post()
   create(
     @Body() createOrderDto: CreateOrderDto,
@@ -141,12 +145,14 @@ export class OrdersController {
   }
 
   @RequirePermissions(Permission.UPDATE_ORDER)
+  @RequiresIdempotency()
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateOrderDto: any) {
+  update(@Param('id') id: string, @Body() updateOrderDto: Record<string, unknown>) {
     return this.ordersService.update(id, updateOrderDto);
   }
 
   @RequirePermissions(Permission.UPDATE_ORDER)
+  @RequiresIdempotency()
   @Patch(':id/status')
   updateStatus(
     @Param('id') id: string,
@@ -164,6 +170,7 @@ export class OrdersController {
   }
 
   @RequirePermissions(Permission.MANAGE_RIDERS)
+  @RequiresIdempotency()
   @Patch(':id/assign-rider')
   assignRider(
     @Param('id') id: string,
@@ -175,6 +182,7 @@ export class OrdersController {
   }
 
   @RequirePermissions(Permission.DELETE_ORDER)
+  @RequiresIdempotency()
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id') id: string, @Request() req: AuthenticatedRequest) {
@@ -183,30 +191,28 @@ export class OrdersController {
   }
 
   @RequirePermissions(Permission.UPDATE_ORDER)
+  @RequiresIdempotency()
   @Patch(':id/raise-dispute')
   @HttpCode(HttpStatus.OK)
   raiseDispute(
     @Param('id') id: string,
-
-    @Body() dto: any,
+    @Body() dto: RaiseDisputeDto,
     @Request() req: AuthenticatedRequest,
   ) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call
     return this.ordersService.raiseDispute(id, dto, req.user?.id);
   }
 
   @RequirePermissions(Permission.UPDATE_ORDER)
   @Auditable({ action: 'order.resolve-dispute', resourceType: 'Order' })
   @UseInterceptors(AuditLogInterceptor)
+  @RequiresIdempotency()
   @Patch(':id/resolve-dispute')
   @HttpCode(HttpStatus.OK)
   resolveDispute(
     @Param('id') id: string,
-
-    @Body() dto: any,
+    @Body() dto: ResolveDisputeDto,
     @Request() req: AuthenticatedRequest,
   ) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call
     return this.ordersService.resolveDispute(id, dto, req.user?.id);
   }
 }

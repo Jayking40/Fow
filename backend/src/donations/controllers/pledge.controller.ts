@@ -12,6 +12,7 @@ import {
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { Public } from '../../auth/decorators/public.decorator';
+import { RequiresIdempotency } from '../../common/idempotency/requires-idempotency.decorator';
 import { DonationAsset } from '../enums/donation.enum';
 import { PledgeFrequency, PledgeStatus } from '../enums/pledge.enum';
 import { PledgeEntity } from '../entities/pledge.entity';
@@ -40,6 +41,7 @@ export class PledgeController {
   constructor(private readonly pledgeService: PledgeService) {}
 
   @Post()
+  @RequiresIdempotency()
   @ApiOperation({ summary: 'Create a recurring pledge with optional earmarks' })
   @ApiResponse({ status: 201, type: PledgeEntity })
   async create(@Body() dto: CreatePledgeDto, @Request() req: { user?: { id?: string } }) {
@@ -63,6 +65,7 @@ export class PledgeController {
   }
 
   @Patch(':id/status')
+  @RequiresIdempotency()
   @ApiOperation({ summary: 'Pause, resume (active), or complete a pledge' })
   async setStatus(@Param('id') id: string, @Body() dto: UpdatePledgeStatusDto) {
     return this.pledgeService.setStatus(id, dto.status);

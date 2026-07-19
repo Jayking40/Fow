@@ -4,6 +4,7 @@ import { RequirePermissions } from '../auth/decorators/require-permissions.decor
 import { Permission } from '../auth/enums/permission.enum';
 import { BloodComponent } from '../blood-units/enums/blood-component.enum';
 import { RoleAwareThrottlerGuard } from '../throttler/role-aware-throttler.guard';
+import { RequiresIdempotency } from '../common/idempotency/requires-idempotency.decorator';
 
 import { BloodRequestsService } from './blood-requests.service';
 import { CreateBloodRequestDto } from './dto/create-blood-request.dto';
@@ -19,12 +20,13 @@ export class BloodRequestsController {
   ) {}
 
   @RequirePermissions(Permission.CREATE_ORDER)
+  @RequiresIdempotency()
   @Post()
   create(
     @Body() dto: CreateBloodRequestDto,
     @Req() req: { user: { id: string; role: string; email: string } },
   ) {
-    return this.bloodRequestsService.create(dto, req.user as any);
+    return this.bloodRequestsService.create(dto, req.user);
   }
 
   /**
