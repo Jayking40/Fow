@@ -5,96 +5,97 @@ import {
   CallHandler,
   BadRequestException,
   ConflictException,
+  UnprocessableEntityException,
   Logger,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 
 import { Request, Response } from 'express';
-import { Observable, of } from 'rxjs';
-import { tap } from 'rxjs/operators';
+import { Observable, of, from } from 'rxjs';
+import { switchMap, tap } from 'rxjs/operators';
 
 import { ErrorCode } from '../errors/error-codes.enum';
+import { REQUIRES_IDEMPOTENCY_KEY } from './requires-idempotency.decorator';
 
 import { IdempotencyService } from './idempotency.service';
 
 /**
- * Idempotency interceptor for POST endpoints.
+ * Idempotency interceptor for routes marked with @RequiresIdempotency().
  * Ensures duplicate requests return the same result without duplicate writes.
- * Requires Idempotency-Key header.
  */
 @Injectable()
 export class IdempotencyInterceptor implements NestInterceptor {
   private readonly logger = new Logger(IdempotencyInterceptor.name);
 
-  constructor(private readonly idempotencyService: IdempotencyService) {}
+  constructor(
+    private readonly idempotencyService: IdempotencyService,
+    private readonly reflector: Reflector,
+  ) {}
 
-  async intercept(
+  intercept(
     context: ExecutionContext,
     next: CallHandler,
-  ): Promise<Observable<unknown>> {
+  ): Observable<unknown> {
+    const requiresIdempotency = this.reflector.getAllAndOverride<boolean>(
+      REQUIRES_IDEMPOTENCY_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+
+    // If not decorated with @RequiresIdempotency, proceed normally
+    if (!requiresIdempotency) {
+      return next.handle();
+    }
+
     const request = context.switchToHttp().getRequest<Request>();
     const response = context.switchToHttp().getResponse<Response>();
 
-    // Only apply to POST requests
-    if (request.method !== 'POST') {
-      return next.handle();
-    }
-
     const idempotencyKey = request.headers['idempotency-key'] as string;
 
-    // Idempotency-Key is optional but recommended
-    if (!idempotencyKey) {
-      return next.handle();
+    // Check if key is missing
+    if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) {
+      throw new BadRequestException({
+        code: ErrorCode.IDEMPOTENCY_KEY_MISSING,
+        message: 'Idempotency-Key header is required',
+      });
     }
 
-    // Validate idempotency key format
-    if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) {
-      throw new BadRequestException(
-        JSON.stringify({
-          code: ErrorCode.IDEMPOTENCY_KEY_MISSING,
-          message: 'Invalid Idempotency-Key header',
-        }),
-      );
-    }
+    // Generate body hash
+    const bodyHash = this.idempotencyService.generateBodyHash(request.body);
 
-    // Check for cached response
-    const cachedResponse =
-      await this.idempotencyService.getResponse(idempotencyKey);
-    if (cachedResponse) {
-      this.logger.debug(
-        `Returning cached response for idempotency key: ${idempotencyKey}`,
-      );
-      response.status(cachedResponse.statusCode);
-      return of(cachedResponse.body);
-    }
-
-    // Try to acquire lock to prevent concurrent processing
-    const lockAcquired =
-      await this.idempotencyService.acquireLock(idempotencyKey);
-    if (!lockAcquired) {
-      throw new ConflictException(
-        JSON.stringify({
-          code: ErrorCode.IDEMPOTENCY_KEY_CONFLICT,
-          message:
-            'Request with this Idempotency-Key is already being processed',
-        }),
-      );
-    }
-
-    try {
-      return next.handle().pipe(
-        tap(async (data) => {
-          // Store response for future retries
-          const statusCode = response.statusCode || 200;
-          await this.idempotencyService.storeResponse(
-            idempotencyKey,
-            statusCode,
-            data,
-          );
-        }),
-      );
-    } finally {
-      // Release lock after processing
-      await this.idempotencyService.releaseLock(idempotencyKey);
-    }
+    // Use from to convert promise to observable
+    return from(this.idempotencyService.checkAndStart(idempotencyKey, bodyHash)).pipe(
+      switchMap((checkResult) => {
+        switch (checkResult.type) {
+          case 'completed':
+            this.logger.debug(
+              `Returning completed response for idempotency key: ${idempotencyKey}`,
+            );
+            response.status(checkResult.statusCode);
+            return of(checkResult.body);
+          case 'conflict':
+            response.setHeader('Retry-After', checkResult.retryAfter.toString());
+            throw new ConflictException({
+              code: ErrorCode.IDEMPOTENCY_KEY_CONFLICT,
+              message: 'Request with this Idempotency-Key is already being processed',
+            });
+          case 'bodyMismatch':
+            throw new UnprocessableEntityException({
+              code: ErrorCode.IDEMPOTENCY_BODY_MISMATCH,
+              message: 'Request body does not match previous request with the same Idempotency-Key',
+            });
+          case 'proceed':
+            // Proceed with handler execution
+            return next.handle().pipe(
+              tap((data) => {
+                // Store the completed response - we'll use fire-and-forget but log any errors
+                const statusCode = response.statusCode || 200;
+                this.idempotencyService.storeCompleted(idempotencyKey, statusCode, data).catch((err) => {
+                  this.logger.error(`Failed to store idempotency response: ${err instanceof Error ? err.message : String(err)}`);
+                });
+              }),
+            );
+        }
+      }),
+    );
   }
 }

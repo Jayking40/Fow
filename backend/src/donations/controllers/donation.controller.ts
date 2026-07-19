@@ -2,6 +2,7 @@ import { Controller, Post, Body, Get, Param, Patch, Request, UseGuards, UseInter
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RequiresIdempotency } from '../../common/idempotency/requires-idempotency.decorator';
 import { DonationService } from '../services/donation.service';
 import { PledgeService } from '../services/pledge.service';
 import { DonationEntity } from '../entities/donation.entity';
@@ -28,14 +29,16 @@ export class DonationController {
   ) {}
 
   @Post('intent')
+  @RequiresIdempotency()
   @ApiOperation({ summary: 'Create a donation payment intent for the wallet to sign' })
   @ApiResponse({ status: 201, type: DonationEntity })
-  async createIntent(@Body() dto: CreateDonationDto, @Request() req: any) {
+  async createIntent(@Body() dto: CreateDonationDto, @Request() req: { user?: { id?: string } }) {
     const userId = req.user?.id;
     return this.donationService.createIntent({ ...dto, donorUserId: userId });
   }
 
   @Patch(':id/confirm')
+  @RequiresIdempotency()
   @ApiOperation({ summary: 'Submit transaction hash to confirm a payment donation' })
   @ApiResponse({ status: 200, type: DonationEntity })
   async confirmDonation(@Param('id') id: string, @Body() dto: ConfirmDonationDto) {
