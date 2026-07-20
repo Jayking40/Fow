@@ -7,6 +7,8 @@ import { ReactQueryProvider } from "../components/providers/ReactQueryProvider";
 import { I18nProvider } from "../components/providers/I18nProvider";
 import { WalletProvider } from "../components/providers/WalletProvider";
 import NetworkMismatchBanner from "../components/blockchain/NetworkMismatchBanner";
+import { SkipLink } from "../components/accessibility/AccessibleComponents";
+import { OfflineBanner } from "../components/ui/OfflineBanner";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -35,6 +37,7 @@ const dmSans = DM_Sans({
 export const metadata: Metadata = {
   title: "Health Chain",
   description: "Transparent healthcare donation platform",
+  manifest: "/manifest.json",
 };
 
 export default function RootLayout({
@@ -44,13 +47,19 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <link rel="manifest" href="/manifest.json" />
+        <meta name="theme-color" content="#B32346" />
+      </head>
       <body
         className={`${poppins.variable} ${roboto.variable} ${manrope.variable} ${dmSans.variable} antialiased`}
       >
+        <SkipLink href="#main-content" />
         <Suspense fallback={null}>
           <I18nProvider>
             <ReactQueryProvider>
               <WalletProvider>
+                <OfflineBanner />
                 <ToastProvider>{children}</ToastProvider>
                 <NetworkMismatchBanner />
               </WalletProvider>

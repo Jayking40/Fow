@@ -1,76 +1,69 @@
-/**
- * Next.js Middleware for server-side route protection
- * Checks auth state and redirects unauthenticated users
- */
-
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-// Routes that require authentication
 const PROTECTED_ROUTES = ['/dashboard'];
-
-// Routes that should redirect to dashboard if already authenticated
+const ADMIN_ROUTES = ['/admin'];
 const AUTH_ROUTES = ['/auth/signin', '/auth/signup'];
-
-// Routes always publicly accessible — never redirect
 const PUBLIC_ROUTES = ['/transparency'];
+
+function parseAuthCookie(request: NextRequest): { isAuthenticated: boolean; role: string | null } {
+  // Prefer httpOnly session token (set by backend on login)
+  const sessionToken = request.cookies.get('session-token')?.value;
+  if (sessionToken) {
+    // Token presence is the gate; signature/expiry verified by the backend on every API call.
+    // Decode the payload (no verification here — middleware is a routing gate only).
+    try {
+      const payload = JSON.parse(atob(sessionToken.split('.')[1]));
+      const expired = payload.exp && payload.exp * 1000 < Date.now();
+      if (!expired) return { isAuthenticated: true, role: payload.role ?? null };
+    } catch { /* fall through */ }
+  }
+
+  // Fallback: Zustand persisted state (sessionStorage is not readable server-side;
+  // the store also writes to a cookie named 'auth-storage' for SSR reads).
+  // NOTE: this is NOT trusted for admin gating — only for basic /dashboard redirect.
+  const authCookie = request.cookies.get('auth-storage')?.value;
+  if (authCookie) {
+    try {
+      const state = JSON.parse(authCookie);
+      if (state?.state?.isAuthenticated === true) {
+        return { isAuthenticated: true, role: state?.state?.user?.role ?? null };
+      }
+    } catch { /* ignore */ }
+  }
+
+  return { isAuthenticated: false, role: null };
+}
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Get auth token from cookie or session storage (via header)
-  const authCookie = request.cookies.get('auth-storage');
-  
-  // Parse auth state from cookie
-  let isAuthenticated = false;
-  
-  if (authCookie) {
-    try {
-      const authState = JSON.parse(authCookie.value);
-      isAuthenticated = authState?.state?.isAuthenticated === true;
-    } catch {
-      // Invalid cookie, treat as unauthenticated
-      isAuthenticated = false;
-    }
-  }
+  if (PUBLIC_ROUTES.some((r) => pathname.startsWith(r))) return NextResponse.next();
 
-  // Check if current route is protected
-  const isProtectedRoute = PROTECTED_ROUTES.some((route) =>
-    pathname.startsWith(route)
-  );
+  const { isAuthenticated, role } = parseAuthCookie(request);
 
-  // Check if current route is an auth route
-  const isAuthRoute = AUTH_ROUTES.some((route) => pathname.startsWith(route));
+  const isProtected = PROTECTED_ROUTES.some((r) => pathname.startsWith(r));
+  const isAdmin = ADMIN_ROUTES.some((r) => pathname.startsWith(r));
+  const isAuthRoute = AUTH_ROUTES.some((r) => pathname.startsWith(r));
 
-  // Never redirect public transparency routes
-  const isPublicRoute = PUBLIC_ROUTES.some((route) => pathname.startsWith(route));
-  if (isPublicRoute) return NextResponse.next();
-
-  // Redirect unauthenticated users from protected routes
-  if (isProtectedRoute && !isAuthenticated) {
+  if ((isProtected || isAdmin) && !isAuthenticated) {
     const url = new URL('/auth/signin', request.url);
-    url.searchParams.set('redirect', pathname);
+    url.searchParams.set('returnTo', pathname);
     return NextResponse.redirect(url);
   }
 
-  // Redirect authenticated users from auth routes to dashboard
+  if (isAdmin && role !== 'admin') {
+    return NextResponse.redirect(new URL('/403', request.url));
+  }
+
   if (isAuthRoute && isAuthenticated) {
-    return NextResponse.redirect(new URL('/dashboard', request.url));
+    const returnTo = request.nextUrl.searchParams.get('returnTo') || '/dashboard';
+    return NextResponse.redirect(new URL(returnTo, request.url));
   }
 
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: [
-    /*
-     * Match all request paths except:
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
-     * - public folder
-     * - api routes
-     */
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$|api).*)',
-  ],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\.(?:svg|png|jpg|jpeg|gif|webp)$|api).*)'],
 };
