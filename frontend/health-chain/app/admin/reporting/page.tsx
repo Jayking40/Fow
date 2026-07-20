@@ -69,13 +69,13 @@ export default function ReportingPage() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 p-8 space-y-12">
+    <div className="min-h-screen bg-surface-raised p-8 space-y-12">
       <div className="max-w-7xl mx-auto">
         <header className="mb-12">
-          <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 dark:text-white mb-2">
-            Operations Reporting <span className="bg-blue-100 text-blue-600 px-3 py-1 rounded-full text-sm font-semibold ml-2">Beta</span>
+          <h1 className="text-4xl font-extrabold tracking-tight text-text-primary mb-2">
+            Operations Reporting <span className="bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300 px-3 py-1 rounded-full text-sm font-semibold ml-2">Beta</span>
           </h1>
-          <p className="text-slate-500 dark:text-slate-400 max-w-2xl">
+          <p className="text-text-muted max-w-2xl">
             Analyze records across donors, units, and orders with shared filters.
             Export reports for compliance and auditing.
           </p>

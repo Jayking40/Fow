@@ -4,6 +4,8 @@ import React, { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
+import { ConnectionStatusPill } from "@/components/notifications/ConnectionStatusPill";
 import { 
   LayoutGrid, 
   GitPullRequest, 
@@ -53,7 +55,7 @@ export default function DashboardLayout({
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   return (
-    <div className="flex min-h-screen bg-[#F5F7FA] font-poppins text-brand-black">
+    <div className="flex min-h-screen bg-surface-raised font-poppins text-text-primary">
       {/* Mobile Overlay */}
       {isMobileMenuOpen && (
         <div className="fixed inset-0 bg-black/50 z-40 xl:hidden" onClick={() => setIsMobileMenuOpen(false)}/>
@@ -61,7 +63,7 @@ export default function DashboardLayout({
 
       {/* --- SIDEBAR --- */}
       <aside className={classNames(
-        "fixed xl:sticky top-0 left-0 z-50 h-screen bg-white border-r border-gray-100 flex flex-col transition-transform duration-300 ease-in-out shrink-0",
+        "fixed xl:sticky top-0 left-0 z-50 h-screen bg-surface border-r border-border-muted flex flex-col transition-transform duration-300 ease-in-out shrink-0",
         "w-[280px] 2xl:w-[368px]", 
         isMobileMenuOpen ? "translate-x-0" : "-translate-x-full xl:translate-x-0"
       )}>
@@ -92,12 +94,12 @@ export default function DashboardLayout({
                 className={classNames(
                   isActive 
                     ? "bg-[#D32F2F] text-white shadow-md" 
-                    : "text-[#827D7D] hover:bg-gray-50",
+                    : "text-text-muted hover:bg-surface-raised",
                   "flex items-center gap-[12px] w-full h-[48px] 2xl:h-[52px] px-[10px] transition-all duration-200 group font-poppins font-semibold text-[16px] 2xl:text-[20px] tracking-[0.05em]",
                   "rounded-tr-[12px] rounded-bl-[12px] rounded-tl-none rounded-br-none"
                 )}
               >
-                <item.icon className={classNames(isActive ? "text-white" : "text-[#827D7D]", "w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]")} />
+                <item.icon className={classNames(isActive ? "text-white" : "text-text-muted", "w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]")} />
                 {item.name}
               </Link>
             );
@@ -106,11 +108,11 @@ export default function DashboardLayout({
 
         {/* Bottom Actions */}
         <div className="mt-auto mb-[40px] space-y-[14px]">
-          <button className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-brand-black hover:bg-gray-50 font-poppins font-medium text-[16px]">
+          <button className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-text-primary hover:bg-surface-raised font-poppins font-medium text-[16px]">
             <Settings className="w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]" />
             Settings
           </button>
-          <button className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-brand-black hover:bg-gray-50 font-poppins font-medium text-[16px]">
+          <button className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-text-primary hover:bg-surface-raised font-poppins font-medium text-[16px]">
             <LogOut className="w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]" />
             Log out
           </button>
@@ -119,14 +121,20 @@ export default function DashboardLayout({
 
       {/* --- MAIN CONTENT --- */}
       <main className="flex-1 w-full min-w-0 p-4 md:p-8 xl:pt-[60px] xl:px-[40px] overflow-hidden">
-        {/* Mobile Toggle */}
-        <div className="xl:hidden flex items-center justify-between mb-6">
+        {/* Top bar */}
+        <div className="flex items-center justify-between mb-6">
+          <div className="xl:hidden">
             <button onClick={() => setIsMobileMenuOpen(true)}>
-                <Menu className="w-8 h-8 text-gray-700"/>
+              <Menu className="w-8 h-8 text-text-primary"/>
             </button>
+          </div>
+          <div className="flex items-center gap-3 ml-auto">
+            <ConnectionStatusPill />
+            <NotificationBell />
             <div className="w-[40px] h-[40px] rounded-full overflow-hidden">
-                <Image src="/health-agency.jpg" alt="Profile" width={40} height={40} className="object-cover"/>
+              <Image src="/health-agency.jpg" alt="Profile" width={40} height={40} className="object-cover"/>
             </div>
+          </div>
         </div>
         {children}
       </main>
