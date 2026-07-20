@@ -32,6 +32,11 @@ export class DeliveryProofQueryDto {
   temperatureCompliantOnly?: boolean;
 
   @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  lateSync?: boolean;
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
