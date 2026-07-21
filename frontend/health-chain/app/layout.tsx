@@ -7,6 +7,7 @@ import { ReactQueryProvider } from "../components/providers/ReactQueryProvider";
 import { I18nProvider } from "../components/providers/I18nProvider";
 import { WalletProvider } from "../components/providers/WalletProvider";
 import NetworkMismatchBanner from "../components/blockchain/NetworkMismatchBanner";
+import { ThemeProvider } from "../components/providers/ThemeProvider";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -43,20 +44,30 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Pre-hydration theme script — prevents flash of wrong theme */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem('theme');var d=document.documentElement;if(t==='dark'||((!t||t==='system')&&window.matchMedia('(prefers-color-scheme: dark)').matches)){d.classList.add('dark');}else{d.classList.remove('dark');}}catch(e){}})();`,
+          }}
+        />
+      </head>
       <body
-        className={`${poppins.variable} ${roboto.variable} ${manrope.variable} ${dmSans.variable} antialiased`}
+        className={`${poppins.variable} ${roboto.variable} ${manrope.variable} ${dmSans.variable} antialiased bg-surface text-text-primary`}
       >
-        <Suspense fallback={null}>
-          <I18nProvider>
-            <ReactQueryProvider>
-              <WalletProvider>
-                <ToastProvider>{children}</ToastProvider>
-                <NetworkMismatchBanner />
-              </WalletProvider>
-            </ReactQueryProvider>
-          </I18nProvider>
-        </Suspense>
+        <ThemeProvider>
+          <Suspense fallback={null}>
+            <I18nProvider>
+              <ReactQueryProvider>
+                <WalletProvider>
+                  <ToastProvider>{children}</ToastProvider>
+                  <NetworkMismatchBanner />
+                </WalletProvider>
+              </ReactQueryProvider>
+            </I18nProvider>
+          </Suspense>
+        </ThemeProvider>
       </body>
     </html>
   );

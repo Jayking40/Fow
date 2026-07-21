@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useMemo, useState } from 'react';
-
 import {
   useAssignQuarantineReviewer,
   useFinalizeQuarantineCase,
@@ -14,6 +13,208 @@ import type {
   QuarantineDisposition,
   QuarantineReviewState,
 } from '@/lib/types/quarantine';
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorDisplay,
+  Input,
+  LoadingSpinner,
+  Modal,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+  Textarea,
+} from '@/components/ui';
+import type { BadgeVariant } from '@/components/ui';
+
+const REVIEW_STATES: QuarantineReviewState[] = [
+  'PENDING', 'UNDER_REVIEW', 'APPROVED_RELEASE', 'APPROVED_DISCARD', 'CLOSED',
+];
+
+const STATE_BADGE: Record<QuarantineReviewState, BadgeVariant> = {
+  PENDING: 'pending',
+  UNDER_REVIEW: 'info',
+  APPROVED_RELEASE: 'active',
+  APPROVED_DISCARD: 'critical',
+  CLOSED: 'default',
+};
+
+function ReviewPanel({ selected, onClose }: { selected: QuarantineCase; onClose: () => void }) {
+  const assignMutation = useAssignQuarantineReviewer();
+  const reviewMutation = useUpdateQuarantineReview();
+  const finalizeMutation = useFinalizeQuarantineCase();
+
+  const [assignee, setAssignee] = useState(selected.reviewerAssignedTo || '');
+  const [reviewState, setReviewState] = useState<QuarantineReviewState>(selected.reviewState);
+  const [reviewNotes, setReviewNotes] = useState(selected.notes || '');
+  const [disposition, setDisposition] = useState<QuarantineDisposition>('RELEASE');
+  const [dispositionNotes, setDispositionNotes] = useState('');
+  const [policyReference, setPolicyReference] = useState(selected.policyReference || '');
+
+  return (
+    <Modal open onClose={onClose} title="Quarantine Review" className="max-w-2xl">
+      <p className="text-sm text-text-muted mb-4">Case {selected.id.slice(0, 8)}...</p>
+
+      <div className="grid gap-3 rounded-lg border border-border-muted bg-surface-raised p-4 text-sm text-text-secondary md:grid-cols-2 mb-4">
+        <p><span className="font-semibold">Blood Unit:</span> {selected.bloodUnitId}</p>
+        <p><span className="font-semibold">Trigger:</span> {selected.triggerSource}</p>
+        <p><span className="font-semibold">Reason Code:</span> {selected.reasonCode}</p>
+        <p><span className="font-semibold">Current State:</span> {selected.reviewState}</p>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-[1fr_auto] mb-4">
+        <Input
+          value={assignee}
+          onChange={(e) => setAssignee(e.target.value)}
+          placeholder="Assign reviewer (user id)"
+        />
+        <Button
+          onClick={() => assignMutation.mutate({ caseId: selected.id, reviewerAssignedTo: assignee })}
+          disabled={!assignee}
+          loading={assignMutation.isPending}
+        >
+          Assign
+        </Button>
+      </div>
+
+      <div className="space-y-2 mb-4">
+        <Select
+          label="Review State"
+          value={reviewState}
+          onChange={(e) => setReviewState(e.target.value as QuarantineReviewState)}
+          options={REVIEW_STATES.map((s) => ({ value: s, label: s }))}
+        />
+        <Textarea
+          value={reviewNotes}
+          onChange={(e) => setReviewNotes(e.target.value)}
+          rows={3}
+          placeholder="Review notes"
+        />
+        <Button
+          variant="secondary"
+          loading={reviewMutation.isPending}
+          onClick={() => reviewMutation.mutate({ caseId: selected.id, payload: { reviewState, notes: reviewNotes } })}
+        >
+          Save Review
+        </Button>
+      </div>
+
+      <div className="space-y-2 border-t border-border-muted pt-4">
+        <h3 className="text-sm font-bold text-text-primary">Final Disposition</h3>
+        <div className="grid gap-3 md:grid-cols-2">
+          <Select
+            value={disposition}
+            onChange={(e) => setDisposition(e.target.value as QuarantineDisposition)}
+            options={[{ value: 'RELEASE', label: 'Release' }, { value: 'DISCARD', label: 'Discard' }]}
+          />
+          <Input
+            value={policyReference}
+            onChange={(e) => setPolicyReference(e.target.value)}
+            placeholder="Policy reference"
+          />
+        </div>
+        <Textarea
+          value={dispositionNotes}
+          onChange={(e) => setDispositionNotes(e.target.value)}
+          rows={3}
+          placeholder="Disposition rationale"
+        />
+        <Button
+          variant="destructive"
+          loading={finalizeMutation.isPending}
+          onClick={() => finalizeMutation.mutate(
+            { caseId: selected.id, payload: { disposition, notes: dispositionNotes, policyReference } },
+            { onSuccess: onClose }
+          )}
+        >
+          Finalize
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+export default function QuarantineReviewPage() {
+  const [selected, setSelected] = useState<QuarantineCase | null>(null);
+  const [filters, setFilters] = useState<QueryQuarantineCasesParams>({ active: true });
+  const { data, isLoading, isError, refetch } = useQuarantineCases(filters);
+  const rows = useMemo(() => data?.data ?? [], [data]);
+
+  return (
+    <div className="min-h-screen space-y-6 bg-surface p-6 lg:p-10">
+      {selected && <ReviewPanel selected={selected} onClose={() => setSelected(null)} />}
+
+      <div className="border-b border-border-muted pb-5">
+        <h1 className="text-3xl font-bold text-text-primary">Quarantine Review Console</h1>
+        <p className="text-sm text-text-muted">
+          Lab and compliance teams can investigate triggers, assign reviewers, and finalize release or discard decisions.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {[true, false].map((active) => (
+          <button
+            key={String(active)}
+            onClick={() => setFilters((prev) => ({ ...prev, active }))}
+            className={`rounded-full border px-4 py-1.5 text-sm font-semibold transition-colors ${
+              filters.active === active
+                ? 'border-[#D32F2F] bg-[#D32F2F] text-white'
+                : 'border-border-muted bg-surface text-text-muted hover:border-[#D32F2F]'
+            }`}
+          >
+            {active ? 'Active Cases' : 'Closed Cases'}
+          </button>
+        ))}
+      </div>
+
+      {isLoading ? (
+        <LoadingSpinner />
+      ) : isError ? (
+        <ErrorDisplay message="Failed to load quarantine cases." onRetry={refetch} />
+      ) : (
+        <Table>
+          <TableHead>
+            <tr>
+              <TableHeaderCell>Case</TableHeaderCell>
+              <TableHeaderCell>Blood Unit</TableHeaderCell>
+              <TableHeaderCell>Trigger</TableHeaderCell>
+              <TableHeaderCell>Reason</TableHeaderCell>
+              <TableHeaderCell>State</TableHeaderCell>
+              <TableHeaderCell>Reviewer</TableHeaderCell>
+              <TableHeaderCell>Created</TableHeaderCell>
+              <TableHeaderCell />
+            </tr>
+          </TableHead>
+          <TableBody>
+            {rows.length === 0 && (
+              <tr><td colSpan={8}><EmptyState title="No quarantine cases found." /></td></tr>
+            )}
+            {rows.map((row) => (
+              <TableRow key={row.id}>
+                <TableCell className="font-semibold">{row.id.slice(0, 8)}...</TableCell>
+                <TableCell>{row.bloodUnitId.slice(0, 8)}...</TableCell>
+                <TableCell>{row.triggerSource}</TableCell>
+                <TableCell>{row.reasonCode}</TableCell>
+                <TableCell><Badge variant={STATE_BADGE[row.reviewState]}>{row.reviewState}</Badge></TableCell>
+                <TableCell className="text-text-muted">{row.reviewerAssignedTo || '-'}</TableCell>
+                <TableCell className="text-text-muted">{new Date(row.createdAt).toLocaleString()}</TableCell>
+                <TableCell className="text-right">
+                  <Button size="sm" variant="secondary" onClick={() => setSelected(row)}>Review</Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </div>
+  );
+}
+
 
 const REVIEW_STATES: QuarantineReviewState[] = [
   'PENDING',

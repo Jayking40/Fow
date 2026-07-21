@@ -2,15 +2,41 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Light theme (default) ── */
 :root {
   --foreground-rgb: 0, 0, 0;
   --background-start-rgb: 255, 255, 255;
   --background-end-rgb: 255, 255, 255;
+
+  --bg-surface: #ffffff;
+  --bg-surface-raised: #f5f7fa;
+  --text-primary: #1a1a1a;
+  --text-secondary: #3c3c3c;
+  --text-muted: #6b7280;
+  --border-muted: #e5e7eb;
+  --status-info: #3b82f6;
+  --status-warning: #f59e0b;
+  --status-critical: #ef4444;
+  --status-resolved: #10b981;
+}
+
+/* ── Dark theme ── */
+.dark {
+  --bg-surface: #1a1a2e;
+  --bg-surface-raised: #16213e;
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --border-muted: #334155;
+  --status-info: #60a5fa;
+  --status-warning: #fbbf24;
+  --status-critical: #f87171;
+  --status-resolved: #34d399;
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: white;
+  color: var(--text-primary);
+  background: var(--bg-surface);
 }
 
 /* Font System */

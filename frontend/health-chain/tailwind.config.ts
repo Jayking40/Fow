@@ -1,6 +1,7 @@
 import type { Config } from "tailwindcss";
 
 const config: Config = {
+  darkMode: "class",
   content: [
     "./pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
@@ -9,6 +10,17 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
+        // Semantic tokens — map to CSS variables so both themes work
+        surface: "var(--bg-surface)",
+        "surface-raised": "var(--bg-surface-raised)",
+        "text-primary": "var(--text-primary)",
+        "text-secondary": "var(--text-secondary)",
+        "text-muted": "var(--text-muted)",
+        "border-muted": "var(--border-muted)",
+        "status-info": "var(--status-info)",
+        "status-warning": "var(--status-warning)",
+        "status-critical": "var(--status-critical)",
+        "status-resolved": "var(--status-resolved)",
         brand: {
           black: "#000000",
           dark: "#0d0d0d",
