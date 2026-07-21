@@ -203,6 +203,9 @@ export class DeliveryProofService {
     if (query.temperatureCompliantOnly) {
       qb.andWhere('proof.isTemperatureCompliant = true');
     }
+    if (query.lateSync !== undefined) {
+      qb.andWhere('proof.lateSync = :lateSync', { lateSync: query.lateSync });
+    }
 
     qb.orderBy('proof.deliveredAt', 'DESC');
     qb.skip(PaginationUtil.calculateSkip(page, pageSize));
