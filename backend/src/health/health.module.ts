@@ -7,6 +7,7 @@ import { HealthController } from './health.controller';
 import { SorobanRpcHealthIndicator } from './indicators/soroban-rpc.health-indicator';
 import { BullMQHealthIndicator } from './indicators/bullmq.health-indicator';
 import { RedisHealthIndicator } from './indicators/redis.health-indicator';
+import { SocketIoHealthIndicator } from './indicators/socket-io.health-indicator';
 
 @Module({
   imports: [
@@ -20,6 +21,8 @@ import { RedisHealthIndicator } from './indicators/redis.health-indicator';
     SorobanRpcHealthIndicator,
     BullMQHealthIndicator,
     RedisHealthIndicator,
+    SocketIoHealthIndicator,
   ],
 })
-export class HealthModule {}
+export class HealthModule { }
+

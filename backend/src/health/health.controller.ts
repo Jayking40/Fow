@@ -14,6 +14,7 @@ import { Permission } from '../auth/enums/permission.enum';
 import { SorobanRpcHealthIndicator } from './indicators/soroban-rpc.health-indicator';
 import { BullMQHealthIndicator } from './indicators/bullmq.health-indicator';
 import { RedisHealthIndicator } from './indicators/redis.health-indicator';
+import { SocketIoHealthIndicator } from './indicators/socket-io.health-indicator';
 
 @ApiTags('health')
 @Controller('health')
@@ -25,12 +26,9 @@ export class HealthController {
     private readonly soroban: SorobanRpcHealthIndicator,
     private readonly bullmq: BullMQHealthIndicator,
     private readonly memory: MemoryHealthIndicator,
-  ) {}
+    private readonly socketIo: SocketIoHealthIndicator,
+  ) { }
 
-  /**
-   * Public health check — returns only { status: 'ok' | 'error' }.
-   * Does NOT leak internal hostnames or connection strings.
-   */
   @Get()
   @Public()
   @HealthCheck()
@@ -49,10 +47,6 @@ export class HealthController {
     }
   }
 
-  /**
-   * Admin-only detailed breakdown — returns per-component status.
-   * Gated by ADMIN JWT auth so internal details are never public.
-   */
   @Get('details')
   @UseGuards(JwtAuthGuard)
   @RequirePermissions(Permission.ADMIN_HEALTH_READ)
@@ -60,6 +54,7 @@ export class HealthController {
   @ApiOperation({ summary: 'Admin detailed health breakdown' })
   async details() {
     return this.health.check([
+      () => this.socketIo.isHealthy('socket_io'),
       () => this.db.pingCheck('database'),
       () => this.redis.isHealthy('redis'),
       () => this.soroban.isHealthy('soroban_rpc'),

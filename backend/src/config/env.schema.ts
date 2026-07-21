@@ -323,4 +323,18 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsString()
   STORAGE_PATH: string = './uploads';
+
+  // ─── Socket.IO Redis Adapter (multi-instance) ────────────────────────────
+
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  REDIS_SOCKET_ADAPTER_ENABLED: boolean = true;
+
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  // If Redis is down at boot and this is true, fall back to in-memory adapter.
+  // If false, fail fast so misconfiguration doesn't silently break scaling.
+  REDIS_SOCKET_ADAPTER_FALLBACK_ON_BOOT: boolean = true;
 }

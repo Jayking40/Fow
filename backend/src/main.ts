@@ -10,6 +10,8 @@ import { ValidationExceptionFilter } from './common/filters/validation-exception
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 import { validateEnv } from './config/validate-env';
 import { ThrottlerExceptionFilter } from './throttler/throttler-exception.filter';
+import { RedisIoAdapter } from './websockets/redis-io-adapter';
+
 
 async function bootstrap() {
   // Validate env before NestJS initialises any module.
@@ -22,6 +24,9 @@ async function bootstrap() {
 
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
+
+  app.useWebSocketAdapter(new RedisIoAdapter(app, configService));
+
   const logger = new Logger('Bootstrap');
   const isProduction =
     configService.get<string>('NODE_ENV', 'development') === 'production';
