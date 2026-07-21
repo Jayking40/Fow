@@ -97,35 +97,58 @@ export default function TransparencyDashboard({
 
       {/* ── Blood Type Breakdown ── */}
       {bloodTypeData.length > 0 && (
-        <section>
-          <h2 className="font-manrope font-bold text-lg text-brand-black mb-4">
+        <section aria-labelledby="blood-type-heading">
+          <h2 id="blood-type-heading" className="font-manrope font-bold text-lg text-brand-black mb-4">
             Fulfilled Requests by Blood Type
           </h2>
           <div className="rounded-xl border border-gray-100 bg-white shadow-card p-4">
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={bloodTypeData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-                <XAxis
-                  dataKey="type"
-                  tick={{ fontFamily: 'var(--font-roboto)', fontSize: 12 }}
-                />
-                <YAxis
-                  tick={{ fontFamily: 'var(--font-roboto)', fontSize: 12 }}
-                  allowDecimals={false}
-                />
-                <Tooltip
-                  formatter={(v: number) => [v.toLocaleString(), 'Fulfilled']}
-                  contentStyle={{ fontFamily: 'var(--font-roboto)', fontSize: 12 }}
-                />
-                <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                  {bloodTypeData.map((entry) => (
-                    <Cell
-                      key={entry.type}
-                      fill={BLOOD_TYPE_COLORS[entry.type] ?? '#B32346'}
-                    />
+            <div role="img" aria-label={`Bar chart: fulfilled requests by blood type. ${bloodTypeData.map(d => `${d.type}: ${d.count}`).join(', ')}`}>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={bloodTypeData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
+                  <XAxis
+                    dataKey="type"
+                    tick={{ fontFamily: 'var(--font-roboto)', fontSize: 12 }}
+                  />
+                  <YAxis
+                    tick={{ fontFamily: 'var(--font-roboto)', fontSize: 12 }}
+                    allowDecimals={false}
+                  />
+                  <Tooltip
+                    formatter={(v: number) => [v.toLocaleString(), 'Fulfilled']}
+                    contentStyle={{ fontFamily: 'var(--font-roboto)', fontSize: 12 }}
+                  />
+                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                    {bloodTypeData.map((entry) => (
+                      <Cell
+                        key={entry.type}
+                        fill={BLOOD_TYPE_COLORS[entry.type] ?? '#B32346'}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            {/* Data table fallback for screen readers */}
+            <details className="mt-3">
+              <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">View data table</summary>
+              <table className="mt-2 w-full text-sm font-roboto">
+                <caption className="sr-only">Fulfilled requests by blood type</caption>
+                <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
+                  <tr>
+                    <th scope="col" className="text-left px-3 py-2">Blood Type</th>
+                    <th scope="col" className="text-right px-3 py-2">Fulfilled Requests</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bloodTypeData.map((row) => (
+                    <tr key={row.type} className="border-t border-gray-100">
+                      <td className="px-3 py-2 font-medium">{row.type}</td>
+                      <td className="px-3 py-2 text-right">{row.count.toLocaleString()}</td>
+                    </tr>
                   ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+                </tbody>
+              </table>
+            </details>
           </div>
         </section>
       )}

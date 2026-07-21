@@ -58,27 +58,38 @@ export default function DashboardLayout({
     <div className="flex min-h-screen bg-surface-raised font-poppins text-text-primary">
       {/* Mobile Overlay */}
       {isMobileMenuOpen && (
-        <div className="fixed inset-0 bg-black/50 z-40 xl:hidden" onClick={() => setIsMobileMenuOpen(false)}/>
+        <div
+          className="fixed inset-0 bg-black/50 z-40 xl:hidden"
+          onClick={() => setIsMobileMenuOpen(false)}
+          aria-hidden="true"
+        />
       )}
 
       {/* --- SIDEBAR --- */}
-      <aside className={classNames(
-        "fixed xl:sticky top-0 left-0 z-50 h-screen bg-surface border-r border-border-muted flex flex-col transition-transform duration-300 ease-in-out shrink-0",
-        "w-[280px] 2xl:w-[368px]", 
-        isMobileMenuOpen ? "translate-x-0" : "-translate-x-full xl:translate-x-0"
-      )}>
+      <aside
+        aria-label="Main navigation"
+        className={classNames(
+          "fixed xl:sticky top-0 left-0 z-50 h-screen bg-white border-r border-gray-100 flex flex-col transition-transform duration-300 ease-in-out shrink-0",
+          "w-[280px] 2xl:w-[368px]",
+          isMobileMenuOpen ? "translate-x-0" : "-translate-x-full xl:translate-x-0"
+        )}
+      >
         {/* Logo Area */}
         <div className="pt-[30px] 2xl:pt-[39px] pl-[30px] 2xl:pl-[48px] pr-[15px] flex items-center gap-[10px] mb-[40px] 2xl:mb-[60px]">
            <div className="w-[50px] h-[50px] 2xl:w-[61px] 2xl:h-[62px] rounded-full bg-white shadow-[0px_4px_10px_rgba(0,0,0,0.1)] flex items-center justify-center">
-             <Image src="/logo-drop.svg" alt="Logo" width={30} height={36} className="w-[24px] h-[28px] 2xl:w-[30px] 2xl:h-[36.3px]" />
+             <Image src="/logo-drop.svg" alt="Health Chain" width={30} height={36} className="w-[24px] h-[28px] 2xl:w-[30px] 2xl:h-[36.3px]" />
            </div>
-           <button onClick={() => setIsMobileMenuOpen(false)} className="xl:hidden ml-auto text-gray-500">
-             <X className="w-6 h-6" />
+           <button
+             onClick={() => setIsMobileMenuOpen(false)}
+             className="xl:hidden ml-auto text-gray-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 rounded"
+             aria-label="Close navigation menu"
+           >
+             <X className="w-6 h-6" aria-hidden="true" />
            </button>
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 px-[20px] 2xl:pl-[27px] 2xl:pr-[62px] space-y-[12px] 2xl:space-y-[17px] overflow-y-auto no-scrollbar" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
+        <nav aria-label="Sidebar" className="flex-1 px-[20px] 2xl:pl-[27px] 2xl:pr-[62px] space-y-[12px] 2xl:space-y-[17px] overflow-y-auto no-scrollbar" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
           <style jsx>{`
             nav::-webkit-scrollbar {
               display: none;
@@ -91,15 +102,17 @@ export default function DashboardLayout({
                 key={item.name}
                 href={item.href}
                 onClick={() => setIsMobileMenuOpen(false)}
+                aria-current={isActive ? 'page' : undefined}
                 className={classNames(
-                  isActive 
-                    ? "bg-[#D32F2F] text-white shadow-md" 
-                    : "text-text-muted hover:bg-surface-raised",
+                  isActive
+                    ? "bg-[#D32F2F] text-white shadow-md"
+                    : "text-[#827D7D] hover:bg-gray-50",
                   "flex items-center gap-[12px] w-full h-[48px] 2xl:h-[52px] px-[10px] transition-all duration-200 group font-poppins font-semibold text-[16px] 2xl:text-[20px] tracking-[0.05em]",
-                  "rounded-tr-[12px] rounded-bl-[12px] rounded-tl-none rounded-br-none"
+                  "rounded-tr-[12px] rounded-bl-[12px] rounded-tl-none rounded-br-none",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                 )}
               >
-                <item.icon className={classNames(isActive ? "text-white" : "text-text-muted", "w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]")} />
+                <item.icon className={classNames(isActive ? "text-white" : "text-[#827D7D]", "w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]")} aria-hidden="true" />
                 {item.name}
               </Link>
             );
@@ -108,24 +121,35 @@ export default function DashboardLayout({
 
         {/* Bottom Actions */}
         <div className="mt-auto mb-[40px] space-y-[14px]">
-          <button className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-text-primary hover:bg-surface-raised font-poppins font-medium text-[16px]">
-            <Settings className="w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]" />
+          <button
+            className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-brand-black hover:bg-gray-50 font-poppins font-medium text-[16px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 rounded"
+            aria-label="Settings"
+          >
+            <Settings className="w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]" aria-hidden="true" />
             Settings
           </button>
-          <button className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-text-primary hover:bg-surface-raised font-poppins font-medium text-[16px]">
-            <LogOut className="w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]" />
+          <button
+            className="flex items-center justify-center gap-[10px] w-full h-[52px] px-[10px] text-brand-black hover:bg-gray-50 font-poppins font-medium text-[16px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 rounded"
+            aria-label="Log out"
+          >
+            <LogOut className="w-[24px] h-[24px] 2xl:w-[32px] 2xl:h-[32px]" aria-hidden="true" />
             Log out
           </button>
         </div>
       </aside>
 
       {/* --- MAIN CONTENT --- */}
-      <main className="flex-1 w-full min-w-0 p-4 md:p-8 xl:pt-[60px] xl:px-[40px] overflow-hidden">
-        {/* Top bar */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="xl:hidden">
-            <button onClick={() => setIsMobileMenuOpen(true)}>
-              <Menu className="w-8 h-8 text-text-primary"/>
+      <main id="main-content" tabIndex={-1} className="flex-1 w-full min-w-0 p-4 md:p-8 xl:pt-[60px] xl:px-[40px] overflow-hidden">
+        {/* Mobile Toggle */}
+        <div className="xl:hidden flex items-center justify-between mb-6">
+            <button
+              onClick={() => setIsMobileMenuOpen(true)}
+              aria-label="Open navigation menu"
+              aria-expanded={isMobileMenuOpen}
+              aria-controls="sidebar-nav"
+              className="focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 rounded"
+            >
+                <Menu className="w-8 h-8 text-gray-700" aria-hidden="true" />
             </button>
           </div>
           <div className="flex items-center gap-3 ml-auto">

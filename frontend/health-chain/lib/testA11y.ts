@@ -1,6 +1,18 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ReactElement } from 'react';
+import { axe } from './vitest.setup';
+
+/**
+ * Assert zero axe violations for a rendered component.
+ * Usage: await assertNoA11yViolations(<MyComponent />)
+ */
+export async function assertNoA11yViolations(ui: ReactElement) {
+  const { container } = render(ui);
+  const results = await axe(container);
+  // @ts-expect-error — extended by jest-axe in vitest.setup.ts
+  expect(results).toHaveNoViolations();
+}
 
 /**
  * Accessibility testing utilities

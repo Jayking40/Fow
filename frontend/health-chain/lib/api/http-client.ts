@@ -36,65 +36,67 @@ interface RefreshResponse {
 let isRefreshing = false;
 let refreshSubscribers: Array<(token: string) => void> = [];
 
-/**
- * Add request to queue and wait for new token
- */
 function subscribeTokenRefresh(callback: (token: string) => void): void {
   refreshSubscribers.push(callback);
 }
 
-/**
- * Notify all queued requests with new token
- */
 function onTokenRefreshed(token: string): void {
-  refreshSubscribers.forEach((callback) => callback(token));
+  refreshSubscribers.forEach((cb) => cb(token));
   refreshSubscribers = [];
 }
 
-/**
- * Refresh access token using refresh token
- */
-async function refreshAccessToken(): Promise<string | null> {
-  const { refreshToken, clearAuth } = useAuthStore.getState();
-
-  if (!refreshToken) {
-    return null;
+/** Broadcast logout to all tabs and clear local auth state */
+function hardLogout(reason = 'session_expired'): void {
+  useAuthStore.getState().clearAuth();
+  if (typeof window !== 'undefined') {
+    // Cross-tab logout via BroadcastChannel
+    try {
+      new BroadcastChannel('auth').postMessage({ type: 'logout' });
+    } catch { /* not supported in all envs */ }
+    window.location.href = `/auth/signin?reason=${reason}`;
   }
+}
+
+/** Listen for logout broadcasts from other tabs — call once at app startup */
+export function initCrossTabLogout(): () => void {
+  if (typeof window === 'undefined') return () => {};
+  try {
+    const channel = new BroadcastChannel('auth');
+    channel.onmessage = (e) => {
+      if (e.data?.type === 'logout') {
+        useAuthStore.getState().clearAuth();
+        window.location.href = '/auth/signin?reason=session_expired';
+      }
+    };
+    return () => channel.close();
+  } catch {
+    return () => {};
+  }
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  const { refreshToken } = useAuthStore.getState();
+  if (!refreshToken) return null;
 
   try {
     const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refreshToken }),
     });
 
-    if (!response.ok) {
-      throw new Error('Token refresh failed');
-    }
+    if (!response.ok) throw new Error('Token refresh failed');
 
     const data: RefreshResponse = await response.json();
-    
-    // Update tokens in store
     const { updateAccessToken, setTokens } = useAuthStore.getState();
-    
     if (data.refresh_token) {
       setTokens(data.access_token, data.refresh_token);
     } else {
       updateAccessToken(data.access_token);
     }
-
     return data.access_token;
-  } catch (error) {
-    // Refresh failed - clear auth and redirect
-    clearAuth();
-    
-    // Redirect to login with reason
-    if (typeof window !== 'undefined') {
-      window.location.href = '/auth/signin?reason=session_expired';
-    }
-    
+  } catch {
+    hardLogout();
     return null;
   }
 }

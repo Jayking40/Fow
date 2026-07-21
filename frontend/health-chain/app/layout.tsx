@@ -7,7 +7,8 @@ import { ReactQueryProvider } from "../components/providers/ReactQueryProvider";
 import { I18nProvider } from "../components/providers/I18nProvider";
 import { WalletProvider } from "../components/providers/WalletProvider";
 import NetworkMismatchBanner from "../components/blockchain/NetworkMismatchBanner";
-import { ThemeProvider } from "../components/providers/ThemeProvider";
+import { SkipLink } from "../components/accessibility/AccessibleComponents";
+import { OfflineBanner } from "../components/ui/OfflineBanner";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -36,6 +37,7 @@ const dmSans = DM_Sans({
 export const metadata: Metadata = {
   title: "Health Chain",
   description: "Transparent healthcare donation platform",
+  manifest: "/manifest.json",
 };
 
 export default function RootLayout({
@@ -44,30 +46,26 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en">
       <head>
-        {/* Pre-hydration theme script — prevents flash of wrong theme */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('theme');var d=document.documentElement;if(t==='dark'||((!t||t==='system')&&window.matchMedia('(prefers-color-scheme: dark)').matches)){d.classList.add('dark');}else{d.classList.remove('dark');}}catch(e){}})();`,
-          }}
-        />
+        <link rel="manifest" href="/manifest.json" />
+        <meta name="theme-color" content="#B32346" />
       </head>
       <body
         className={`${poppins.variable} ${roboto.variable} ${manrope.variable} ${dmSans.variable} antialiased bg-surface text-text-primary`}
       >
-        <ThemeProvider>
-          <Suspense fallback={null}>
-            <I18nProvider>
-              <ReactQueryProvider>
-                <WalletProvider>
-                  <ToastProvider>{children}</ToastProvider>
-                  <NetworkMismatchBanner />
-                </WalletProvider>
-              </ReactQueryProvider>
-            </I18nProvider>
-          </Suspense>
-        </ThemeProvider>
+        <SkipLink href="#main-content" />
+        <Suspense fallback={null}>
+          <I18nProvider>
+            <ReactQueryProvider>
+              <WalletProvider>
+                <OfflineBanner />
+                <ToastProvider>{children}</ToastProvider>
+                <NetworkMismatchBanner />
+              </WalletProvider>
+            </ReactQueryProvider>
+          </I18nProvider>
+        </Suspense>
       </body>
     </html>
   );
