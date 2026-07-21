@@ -4,6 +4,8 @@ import React, { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
+import { ConnectionStatusPill } from "@/components/notifications/ConnectionStatusPill";
 import { 
   LayoutGrid, 
   GitPullRequest, 
@@ -53,7 +55,7 @@ export default function DashboardLayout({
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   return (
-    <div className="flex min-h-screen bg-[#F5F7FA] font-poppins text-brand-black">
+    <div className="flex min-h-screen bg-surface-raised font-poppins text-text-primary">
       {/* Mobile Overlay */}
       {isMobileMenuOpen && (
         <div
@@ -149,9 +151,14 @@ export default function DashboardLayout({
             >
                 <Menu className="w-8 h-8 text-gray-700" aria-hidden="true" />
             </button>
+          </div>
+          <div className="flex items-center gap-3 ml-auto">
+            <ConnectionStatusPill />
+            <NotificationBell />
             <div className="w-[40px] h-[40px] rounded-full overflow-hidden">
-                <Image src="/health-agency.jpg" alt="Profile" width={40} height={40} className="object-cover"/>
+              <Image src="/health-agency.jpg" alt="Profile" width={40} height={40} className="object-cover"/>
             </div>
+          </div>
         </div>
         {children}
       </main>

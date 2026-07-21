@@ -13,8 +13,10 @@ import { SorobanDlqProcessor } from './processors/soroban-dlq.processor';
 import { SorobanTxProcessor } from './processors/soroban-tx.processor';
 import { BlockchainHealthService } from './services/blockchain-health.service';
 import { ConfirmationService } from './services/confirmation.service';
+import { CursorManager } from './services/cursor-manager.service';
 import { FailedSorobanTxService } from './services/failed-soroban-tx.service';
 import { IdempotencyService } from './services/idempotency.service';
+import { PaginatedQueryService } from './services/paginated-query.service';
 import { QueueMetricsService } from './services/queue-metrics.service';
 import { SorobanService } from './services/soroban.service';
 
@@ -65,6 +67,8 @@ import { SorobanService } from './services/soroban.service';
     BlockchainHealthService,
     QueueMetricsService,
     AdminGuard,
+    CursorManager,
+    PaginatedQueryService,
   ],
   controllers: [BlockchainController],
   exports: [SorobanService, QueueMetricsService],

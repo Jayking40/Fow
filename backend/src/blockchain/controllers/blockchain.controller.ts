@@ -27,6 +27,7 @@ import { BlockchainHealthService } from '../services/blockchain-health.service';
 import { FailedSorobanTxService } from '../services/failed-soroban-tx.service';
 import { QueueMetricsService } from '../services/queue-metrics.service';
 import { SorobanService } from '../services/soroban.service';
+import { PaginatedQueryService } from '../services/paginated-query.service';
 
 import type {
   SorobanTxJob,
@@ -44,6 +45,7 @@ export class BlockchainController {
     private queueMetricsService: QueueMetricsService,
     private failedTxService: FailedSorobanTxService,
     private blockchainHealthService: BlockchainHealthService,
+    private paginatedQueryService: PaginatedQueryService,
   ) {}
 
   /**
@@ -363,5 +365,89 @@ export class BlockchainController {
   @HttpCode(HttpStatus.OK)
   async getBlockchainHealth() {
     return this.blockchainHealthService.check();
+  }
+
+  // ── Paginated Query Endpoints (Issue #49) ─────────────────────────────────
+
+  @Get('inventory/paginated')
+  @HttpCode(HttpStatus.OK)
+  async queryInventoryPaginated(
+    @Query('bloodType') bloodType?: string,
+    @Query('region') region?: string,
+    @Query('cursor') cursor?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.paginatedQueryService.queryInventoryPaginated({
+      bloodType,
+      region,
+      cursor,
+      pageSize: pageSize ? parseInt(pageSize, 10) : undefined,
+    });
+  }
+
+  @Get('requests/paginated')
+  @HttpCode(HttpStatus.OK)
+  async queryRequestsPaginated(
+    @Query('hospitalId') hospitalId?: string,
+    @Query('status') status?: string,
+    @Query('cursor') cursor?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.paginatedQueryService.queryRequestsPaginated({
+      hospitalId,
+      status,
+      cursor,
+      pageSize: pageSize ? parseInt(pageSize, 10) : undefined,
+    });
+  }
+
+  @Get('disputes/paginated')
+  @HttpCode(HttpStatus.OK)
+  async queryDisputesPaginated(
+    @Query('status') status?: string,
+    @Query('organizationId') organizationId?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('cursor') cursor?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.paginatedQueryService.queryDisputesPaginated({
+      status,
+      organizationId,
+      startDate,
+      endDate,
+      cursor,
+      pageSize: pageSize ? parseInt(pageSize, 10) : undefined,
+    });
+  }
+
+  @Get('units/:unitId/trail/paginated')
+  @HttpCode(HttpStatus.OK)
+  async getUnitTrailPaginated(
+    @Param('unitId') unitId: string,
+    @Query('cursor') cursor?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.paginatedQueryService.getUnitTrailPaginated({
+      unitId,
+      cursor,
+      pageSize: pageSize ? parseInt(pageSize, 10) : undefined,
+    });
+  }
+
+  @Get('verification-events/paginated')
+  @HttpCode(HttpStatus.OK)
+  async getVerificationEventsPaginated(
+    @Query('organizationId') organizationId?: string,
+    @Query('eventType') eventType?: string,
+    @Query('cursor') cursor?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.paginatedQueryService.getVerificationEventsPaginated({
+      organizationId,
+      eventType,
+      cursor,
+      pageSize: pageSize ? parseInt(pageSize, 10) : undefined,
+    });
   }
 }

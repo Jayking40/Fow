@@ -52,7 +52,7 @@ export default function RootLayout({
         <meta name="theme-color" content="#B32346" />
       </head>
       <body
-        className={`${poppins.variable} ${roboto.variable} ${manrope.variable} ${dmSans.variable} antialiased`}
+        className={`${poppins.variable} ${roboto.variable} ${manrope.variable} ${dmSans.variable} antialiased bg-surface text-text-primary`}
       >
         <SkipLink href="#main-content" />
         <Suspense fallback={null}>

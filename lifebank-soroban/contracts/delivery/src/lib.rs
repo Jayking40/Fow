@@ -1,11 +1,13 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
 };
 
 const DEFAULT_MIN_TEMPERATURE_C: i32 = 2;
 const DEFAULT_MAX_TEMPERATURE_C: i32 = 6;
+/// ~24 hours at 5 seconds per ledger.
+const DEFAULT_CONFIRMATION_WINDOW_LEDGERS: u32 = 17_280;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -32,6 +34,29 @@ pub struct ProofRequirements {
     pub requires_temperature_log: bool,
 }
 
+/// Lifecycle of a two-phase proof commitment.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeliveryStatus {
+    Submitted,
+    Confirmed,
+    ContestableTimeout,
+}
+
+/// Cryptographic commitment binding an on-chain delivery to the off-chain
+/// evidence bundle assembled by the backend proof-bundle module.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofCommitment {
+    pub delivery_id: u64,
+    pub bundle_hash: BytesN<32>,
+    pub courier: Address,
+    pub facility: Address,
+    pub submitted_at: u64,
+    pub confirmed_at: Option<u64>,
+    pub status: DeliveryStatus,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
@@ -40,7 +65,9 @@ pub enum DataKey {
     DeliveryCounter,
     TemperatureThresholds,
     ProofRequirements,
+    ConfirmationWindow,
     ComplianceAttestation(u64),
+    ProofCommitment(u64),
 }
 
 #[contract]
@@ -48,6 +75,7 @@ pub struct DeliveryContract;
 
 #[contractimpl]
 impl DeliveryContract {
+    #[allow(deprecated)] // events pending migration to #[contractevent]
     pub fn initialize(env: Env, admin: Address, request_contract: Address) -> Result<(), Error> {
         admin.require_auth();
 
@@ -78,6 +106,10 @@ impl DeliveryContract {
         env.storage()
             .instance()
             .set(&DataKey::ProofRequirements, &proof_requirements);
+        env.storage().instance().set(
+            &DataKey::ConfirmationWindow,
+            &DEFAULT_CONFIRMATION_WINDOW_LEDGERS,
+        );
 
         env.events().publish(
             (symbol_short!("init"), symbol_short!("v1")),
@@ -128,6 +160,7 @@ impl DeliveryContract {
 
     /// Record a compliance attestation hash for a completed delivery.
     /// The hash is produced off-chain by the backend after evaluating telemetry.
+    #[allow(deprecated)] // events pending migration to #[contractevent]
     pub fn record_compliance_attestation(
         env: Env,
         admin: Address,
