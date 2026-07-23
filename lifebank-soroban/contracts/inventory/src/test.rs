@@ -12,14 +12,10 @@ const SHELF_LIFE_SECS: u64 = 35 * 86400;
 fn create_test_contract<'a>() -> (Env, Address, InventoryContractClient<'a>, Address) {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(InventoryContract, ());
-    let client = InventoryContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-
-    client.initialize(&admin);
-
+    // Atomic deploy+init via __constructor.
+    let contract_id = env.register(InventoryContract, (&admin,));
+    let client = InventoryContractClient::new(&env, &contract_id);
     (env, admin, client, contract_id)
 }
 
@@ -33,12 +29,13 @@ fn test_initialize_success() {
     assert_eq!(stored_admin, admin);
 }
 
+/// Tests that the legacy initialize() path returns AlreadyInitialized
+/// when the constructor already ran atomically at deploy time.
 #[test]
 #[should_panic(expected = "Error(Contract, #100)")]
 fn test_initialize_already_initialized() {
     let (_env, admin, client, _contract_id) = create_test_contract();
-
-    // Try to initialize again
+    // Constructor already ran — legacy initialize must panic.
     client.initialize(&admin);
 }
 

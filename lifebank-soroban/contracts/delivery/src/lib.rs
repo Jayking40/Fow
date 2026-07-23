@@ -73,8 +73,52 @@ pub enum DataKey {
 #[contract]
 pub struct DeliveryContract;
 
+fn do_delivery_init(env: &Env, admin: Address, request_contract: Address) {
+    let thresholds = TemperatureThresholds {
+        min_celsius: DEFAULT_MIN_TEMPERATURE_C,
+        max_celsius: DEFAULT_MAX_TEMPERATURE_C,
+    };
+    let proof_requirements = ProofRequirements {
+        requires_photo_proof: true,
+        requires_recipient_signature: true,
+        requires_temperature_log: true,
+    };
+
+    env.storage().instance().set(&DataKey::Admin, &admin);
+    env.storage()
+        .instance()
+        .set(&DataKey::RequestContract, &request_contract);
+    env.storage()
+        .instance()
+        .set(&DataKey::DeliveryCounter, &0u64);
+    env.storage()
+        .instance()
+        .set(&DataKey::TemperatureThresholds, &thresholds);
+    env.storage()
+        .instance()
+        .set(&DataKey::ProofRequirements, &proof_requirements);
+    env.storage().instance().set(
+        &DataKey::ConfirmationWindow,
+        &DEFAULT_CONFIRMATION_WINDOW_LEDGERS,
+    );
+
+    env.events().publish(
+        (symbol_short!("init"), symbol_short!("v1")),
+        (admin, request_contract),
+    );
+}
+
 #[contractimpl]
 impl DeliveryContract {
+    /// Atomic constructor — deploy + init in a single transaction.
+    pub fn __constructor(env: Env, admin: Address, request_contract: Address) {
+        admin.require_auth();
+        if Self::is_initialized(env.clone()) {
+            panic!("already initialized");
+        }
+        do_delivery_init(&env, admin, request_contract);
+    }
+
     #[allow(deprecated)] // events pending migration to #[contractevent]
     pub fn initialize(env: Env, admin: Address, request_contract: Address) -> Result<(), Error> {
         admin.require_auth();
@@ -83,39 +127,7 @@ impl DeliveryContract {
             return Err(Error::AlreadyInitialized);
         }
 
-        let thresholds = TemperatureThresholds {
-            min_celsius: DEFAULT_MIN_TEMPERATURE_C,
-            max_celsius: DEFAULT_MAX_TEMPERATURE_C,
-        };
-        let proof_requirements = ProofRequirements {
-            requires_photo_proof: true,
-            requires_recipient_signature: true,
-            requires_temperature_log: true,
-        };
-
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::RequestContract, &request_contract);
-        env.storage()
-            .instance()
-            .set(&DataKey::DeliveryCounter, &0u64);
-        env.storage()
-            .instance()
-            .set(&DataKey::TemperatureThresholds, &thresholds);
-        env.storage()
-            .instance()
-            .set(&DataKey::ProofRequirements, &proof_requirements);
-        env.storage().instance().set(
-            &DataKey::ConfirmationWindow,
-            &DEFAULT_CONFIRMATION_WINDOW_LEDGERS,
-        );
-
-        env.events().publish(
-            (symbol_short!("init"), symbol_short!("v1")),
-            (admin, request_contract),
-        );
-
+        do_delivery_init(&env, admin, request_contract);
         Ok(())
     }
 

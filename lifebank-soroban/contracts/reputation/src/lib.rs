@@ -176,11 +176,52 @@ pub enum DataKey {
 
 // ── Contract ───────────────────────────────────────────────────────────────────
 
+fn do_reputation_init(env: &Env, admin: Address) {
+    env.storage().instance().set(&DataKey::Admin, &admin);
+    env.storage().instance().set(
+        &DataKey::RatingScaleConfig,
+        &RatingScaleConfig {
+            min_rating: DEFAULT_MIN_RATING,
+            max_rating: DEFAULT_MAX_RATING,
+        },
+    );
+    env.storage().instance().set(
+        &DataKey::DecayConfig,
+        &DecayConfig {
+            decay_period_secs: DECAY_PERIOD_SECS,
+            max_decay: MAX_DECAY,
+            rating_half_life_secs: HALF_LIFE_SECS,
+        },
+    );
+    env.storage()
+        .instance()
+        .set(&DataKey::MinimumInteractions, &DEFAULT_MIN_INTERACTIONS);
+    env.storage().instance().set(
+        &DataKey::BadgeConfig,
+        &BadgeConfig {
+            enabled: true,
+            min_score_for_badge: DEFAULT_BADGE_MIN_SCORE,
+            min_interactions_for_badge: DEFAULT_BADGE_MIN_INTERACTIONS,
+        },
+    );
+    env.events()
+        .publish((symbol_short!("init"), symbol_short!("v1")), admin);
+}
+
 #[contract]
 pub struct ReputationContract;
 
 #[contractimpl]
 impl ReputationContract {
+    /// Atomic constructor — deploy + init in a single transaction.
+    pub fn __constructor(env: Env, admin: Address) {
+        admin.require_auth();
+        if Self::is_initialized(env.clone()) {
+            panic!("already initialized");
+        }
+        do_reputation_init(&env, admin);
+    }
+
     /// Initialize the contract with the default configuration.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
@@ -189,37 +230,7 @@ impl ReputationContract {
             return Err(Error::AlreadyInitialized);
         }
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(
-            &DataKey::RatingScaleConfig,
-            &RatingScaleConfig {
-                min_rating: DEFAULT_MIN_RATING,
-                max_rating: DEFAULT_MAX_RATING,
-            },
-        );
-        env.storage().instance().set(
-            &DataKey::DecayConfig,
-            &DecayConfig {
-                decay_period_secs: DECAY_PERIOD_SECS,
-                max_decay: MAX_DECAY,
-                rating_half_life_secs: HALF_LIFE_SECS,
-            },
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::MinimumInteractions, &DEFAULT_MIN_INTERACTIONS);
-        env.storage().instance().set(
-            &DataKey::BadgeConfig,
-            &BadgeConfig {
-                enabled: true,
-                min_score_for_badge: DEFAULT_BADGE_MIN_SCORE,
-                min_interactions_for_badge: DEFAULT_BADGE_MIN_INTERACTIONS,
-            },
-        );
-
-        env.events()
-            .publish((symbol_short!("init"), symbol_short!("v1")), admin);
-
+        do_reputation_init(&env, admin);
         Ok(())
     }
 

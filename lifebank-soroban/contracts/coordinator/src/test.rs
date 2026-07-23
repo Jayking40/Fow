@@ -258,14 +258,18 @@ fn setup<'a>() -> Harness<'a> {
     let req_id = env.register(MockRequestContract, ());
     let inv_id = env.register(MockInventoryContract, ());
     let pay_id = env.register(MockPaymentContract, ());
-    let coord_id = env.register(CoordinatorContract, ());
 
-    // Initialize inventory mock with admin
+    // Initialize inventory mock with admin (mock has no constructor)
     let inv = MockInventoryContractClient::new(&env, &inv_id);
     inv.initialize(&admin);
 
+    // Coordinator uses __constructor — pass args at register time
+    let coord_id = env.register(
+        CoordinatorContract,
+        (&admin, &req_id, &inv_id, &pay_id),
+    );
+
     let coord = CoordinatorContractClient::new(&env, &coord_id);
-    coord.initialize(&admin, &req_id, &inv_id, &pay_id);
 
     Harness {
         env,
@@ -872,9 +876,12 @@ mod upgrade_tests {
         let h = setup();
 
         // Simulate storage written by an older binary (schema 0 < target).
-        let coord_id = h.env.register(CoordinatorContract, ());
+        // Register a fresh coordinator with constructor args.
+        let coord_id = h.env.register(
+            CoordinatorContract,
+            (&h.admin, &h.req_id, &h.inv_id, &h.pay_id),
+        );
         let coord = CoordinatorContractClient::new(&h.env, &coord_id);
-        coord.initialize(&h.admin, &h.req_id, &h.inv_id, &h.pay_id);
         h.env.as_contract(&coord_id, || {
             h.env
                 .storage()
@@ -914,11 +921,14 @@ mod upgrade_tests {
         let req_id = env.register(MockIncompatibleContract, ());
         let inv_id = env.register(MockInventoryContract, ());
         let pay_id = env.register(MockPaymentContract, ());
-        let coord_id = env.register(CoordinatorContract, ());
         MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
 
+        // Coordinator uses __constructor — pass args at register time.
+        let coord_id = env.register(
+            CoordinatorContract,
+            (&admin, &req_id, &inv_id, &pay_id),
+        );
         let coord = CoordinatorContractClient::new(&env, &coord_id);
-        coord.initialize(&admin, &req_id, &inv_id, &pay_id);
 
         let result = coord.try_allocate_units(&1u64, &vec![&env, 1u64], &1u64, &admin);
         assert_eq!(
@@ -949,11 +959,14 @@ mod upgrade_tests {
         let req_id = env.register(MockVersionlessContract, ());
         let inv_id = env.register(MockInventoryContract, ());
         let pay_id = env.register(MockPaymentContract, ());
-        let coord_id = env.register(CoordinatorContract, ());
         MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
 
+        // Coordinator uses __constructor — pass args at register time.
+        let coord_id = env.register(
+            CoordinatorContract,
+            (&admin, &req_id, &inv_id, &pay_id),
+        );
         let coord = CoordinatorContractClient::new(&env, &coord_id);
-        coord.initialize(&admin, &req_id, &inv_id, &pay_id);
 
         let result = coord.try_allocate_units(&1u64, &vec![&env, 1u64], &1u64, &admin);
         assert_eq!(

@@ -183,6 +183,18 @@ pub struct IdentityContract;
 
 #[contractimpl]
 impl IdentityContract {
+    /// Atomic constructor — deploy + init in a single transaction.
+    pub fn __constructor(env: Env, admin: Address) {
+        if Self::is_initialized(env.clone()) {
+            panic!("already initialized");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::OrgCounter, &0u32);
+        Self::grant_role(env.clone(), admin.clone(), Role::Admin);
+        env.events()
+            .publish((symbol_short!("init"), symbol_short!("v1")), admin);
+    }
+
     /// Initialize the contract with an admin
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if Self::is_initialized(env.clone()) {

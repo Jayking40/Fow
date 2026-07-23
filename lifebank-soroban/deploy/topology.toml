@@ -1,0 +1,151 @@
+# lifebank-soroban/deploy/topology.toml
+#
+# Canonical deployment manifest for the full Lifebank contract topology.
+#
+# The orchestration script (scripts/deploy.sh) reads this file and:
+#   1. Builds all WASMs (or verifies hashes from the lockfile on re-run)
+#   2. Deploys every contract whose address is not yet in the lockfile
+#   3. Wires cross-contract addresses via governed setters
+#   4. Assigns roles from the [roles] table
+#   5. Writes deployed addresses + WASM hashes to deployments/<network>.json
+#
+# Re-running against a partial deployment completes rather than duplicates.
+# Contracts already present in the lockfile are skipped.
+#
+# Per-environment overrides live in deploy/<network>.toml and are deep-merged
+# on top of this file at runtime (env file wins on key conflicts).
+
+[workspace]
+# Pinned Rust toolchain — must match rust-toolchain.toml in the repo root.
+# The containerised build (Dockerfile.build) enforces this automatically.
+rust_toolchain = "1.81.0"
+cargo_target   = "wasm32v1-none"
+# stellar CLI version required by the scripts
+stellar_cli_min = "21.0.0"
+
+# ── Deploy order ──────────────────────────────────────────────────────────────
+# Contracts are deployed in the order listed here.
+# "late_wire" contracts receive cross-contract addresses AFTER all contracts
+# are deployed (addresses are not yet known at deploy time).
+deploy_order = [
+  "inventory",
+  "requests",
+  "payments",
+  "temperature",
+  "reputation",
+  "identity",
+  "delivery",
+  "matching",
+  "analytics",
+  "coordinator",   # coordinator is always last: it needs all peer addresses
+]
+
+# ── Contract definitions ───────────────────────────────────────────────────────
+
+[contracts.inventory]
+crate      = "inventory-contract"
+wasm_name  = "inventory_contract"
+# Constructor args (late-bound values are filled in by the script at runtime)
+[contracts.inventory.constructor]
+admin = "${DEPLOYER_ADDRESS}"
+
+[contracts.requests]
+crate     = "requests-contract"
+wasm_name = "requests_contract"
+[contracts.requests.constructor]
+admin              = "${DEPLOYER_ADDRESS}"
+inventory_contract = "${inventory.address}"
+
+[contracts.payments]
+crate     = "payment-contract"
+wasm_name = "payment_contract"
+[contracts.payments.constructor]
+admin             = "${DEPLOYER_ADDRESS}"
+requests_contract = "${requests.address}"   # optional — enables request-state validation
+
+[contracts.temperature]
+crate     = "temperature-contract"
+wasm_name = "temperature_contract"
+[contracts.temperature.constructor]
+admin = "${DEPLOYER_ADDRESS}"
+
+[contracts.reputation]
+crate     = "reputation-contract"
+wasm_name = "reputation_contract"
+[contracts.reputation.constructor]
+admin = "${DEPLOYER_ADDRESS}"
+
+[contracts.identity]
+crate     = "identity-contract"
+wasm_name = "identity_contract"
+[contracts.identity.constructor]
+admin = "${DEPLOYER_ADDRESS}"
+
+[contracts.delivery]
+crate     = "delivery-contract"
+wasm_name = "delivery_contract"
+[contracts.delivery.constructor]
+admin            = "${DEPLOYER_ADDRESS}"
+request_contract = "${requests.address}"
+
+[contracts.matching]
+crate     = "matching-contract"
+wasm_name = "matching_contract"
+[contracts.matching.constructor]
+admin              = "${DEPLOYER_ADDRESS}"
+inventory_contract = "${inventory.address}"
+requests_contract  = "${requests.address}"
+
+[contracts.analytics]
+crate     = "analytics-contract"
+wasm_name = "analytics_contract"
+[contracts.analytics.constructor]
+admin               = "${DEPLOYER_ADDRESS}"
+inventory_contract  = "${inventory.address}"
+requests_contract   = "${requests.address}"
+payments_contract   = "${payments.address}"
+reputation_contract = "${reputation.address}"
+
+[contracts.coordinator]
+crate     = "coordinator-contract"
+wasm_name = "coordinator_contract"
+[contracts.coordinator.constructor]
+admin              = "${DEPLOYER_ADDRESS}"
+request_contract   = "${requests.address}"
+inventory_contract = "${inventory.address}"
+payment_contract   = "${payments.address}"
+
+# ── Late-bound wiring ─────────────────────────────────────────────────────────
+# After all contracts are deployed the script calls these governed setters to
+# complete address wiring that cannot be known at constructor time.
+# Each entry is: contract . setter_fn ( arg_name = resolved_value )
+
+[[wiring]]
+contract = "temperature"
+setter   = "set_coordinator"
+args     = { admin = "${DEPLOYER_ADDRESS}", coordinator = "${coordinator.address}" }
+
+# ── Role assignments ──────────────────────────────────────────────────────────
+# Applied after wiring. Each entry calls authorize_hospital / add_oracle /
+# grant_role as appropriate on the target contract.
+# Actual addresses are supplied per-env in the override files.
+
+[[roles]]
+contract = "inventory"
+fn       = "authorize_blood_bank"
+# bank addresses are env-specific — see deploy/<network>.toml
+
+# ── Initial configuration ─────────────────────────────────────────────────────
+
+[config.coordinator]
+# 24-hour allocation expiry is hardcoded in the contract; nothing to wire here.
+
+[config.payments]
+# 7-day dispute timeout (seconds). Override per-env.
+dispute_timeout_secs = 604800
+
+[config.temperature]
+# Default thresholds set via set_threshold after deploy.
+# unit_id 0 is used as the "global default" sentinel in the smoke test.
+default_min_celsius_x100 = 200   # 2.00 °C
+default_max_celsius_x100 = 600   # 6.00 °C

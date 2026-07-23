@@ -15,6 +15,18 @@ pub struct InventoryContract;
 
 #[contractimpl]
 impl InventoryContract {
+    /// Atomic constructor — deploy + init in a single transaction.
+    ///
+    /// soroban-sdk 22+ executes this as part of the deploy call so there is
+    /// never an uninitialized-claimable window between deployment and setup.
+    pub fn __constructor(env: Env, admin: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("already initialized");
+        }
+        storage::set_admin(&env, &admin);
+    }
+
     /// Initialize the inventory contract
     ///
     /// # Arguments

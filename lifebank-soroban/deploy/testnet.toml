@@ -1,0 +1,36 @@
+# deploy/testnet.toml — overrides for Stellar Testnet
+#
+# Usage:
+#   NETWORK=testnet DEPLOYER_SECRET_KEY=S... ./scripts/deploy.sh
+
+[env]
+network            = "testnet"
+rpc_url            = "https://soroban-testnet.stellar.org"
+network_passphrase = "Test SDF Network ; September 2015"
+source_identity    = "${DEPLOYER_SECRET_KEY}"
+
+[config.payments]
+# 7-day dispute timeout
+dispute_timeout_secs = 604800
+
+[config.temperature]
+default_min_celsius_x100 = 200
+default_max_celsius_x100 = 600
+
+# Testnet blood-bank and hospital role assignments.
+# Set TESTNET_BLOOD_BANK and TESTNET_HOSPITAL env vars at deploy time.
+[[roles]]
+contract = "inventory"
+fn       = "authorize_blood_bank"
+args     = { bank_id = "${TESTNET_BLOOD_BANK}" }
+
+[[roles]]
+contract = "requests"
+fn       = "authorize_hospital"
+args     = { hospital = "${TESTNET_HOSPITAL}" }
+
+# Canary smoke test runs automatically after deploy on testnet.
+[smoke]
+run_canary = true
+# Dust amounts (stroop) for the canary allocate→deliver→settle workflow
+canary_payment_amount = 1000000   # 0.1 XLM in stroops

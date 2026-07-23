@@ -1,0 +1,65 @@
+# Dockerfile.build — reproducible, containerised WASM builder
+#
+# Produces bit-for-bit identical WASMs across machines by pinning:
+#   • Debian base image (digest-pinned)
+#   • Rust toolchain version
+#   • wasm-opt version (via binaryen)
+#
+# Usage:
+#   docker build -f Dockerfile.build -t lifebank-builder .
+#   docker run --rm -v "$PWD/target:/workspace/target" lifebank-builder
+#
+# Or use scripts/build-reproducible.sh which wraps the above.
+
+# Pin the base image by digest so the build is hermetic.
+FROM debian:bookworm-slim@sha256:67f3931ad8cb1967beec602d8c0506af1e37e8d73c2a0b38b181ec5d8560d395
+
+# ── System dependencies ───────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates build-essential pkg-config \
+      binaryen \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Rust toolchain (pinned) ───────────────────────────────────────────────────
+ARG RUST_VERSION=1.81.0
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --no-modify-path \
+        --default-toolchain "${RUST_VERSION}" \
+        --component rust-std \
+        --target wasm32v1-none \
+    && rustup target add wasm32v1-none \
+    && rustup show
+
+# ── stellar-cli (pinned) ──────────────────────────────────────────────────────
+ARG STELLAR_CLI_VERSION=21.4.0
+RUN cargo install --locked stellar-cli@${STELLAR_CLI_VERSION}
+
+# ── Workspace ─────────────────────────────────────────────────────────────────
+WORKDIR /workspace
+COPY . .
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+# CARGO_INCREMENTAL=0 and fixed SOURCE_DATE_EPOCH give deterministic output.
+ENV CARGO_INCREMENTAL=0 \
+    SOURCE_DATE_EPOCH=0
+
+RUN cargo build --release --target wasm32v1-none \
+    && for wasm in target/wasm32v1-none/release/*_contract.wasm; do \
+         [ -f "$wasm" ] || continue; \
+         stellar contract optimize --wasm "$wasm"; \
+       done
+
+# ── Compute and print SHA-256 hashes ─────────────────────────────────────────
+RUN echo "" && echo "=== WASM SHA-256 hashes ===" && \
+    for wasm in target/wasm32v1-none/release/*.wasm; do \
+      [ -f "$wasm" ] || continue; \
+      echo "$(sha256sum "$wasm")"; \
+    done
+
+# The built WASMs are in /workspace/target/wasm32v1-none/release/
+# Mount a host directory to /workspace/target to extract them:
+#   docker run --rm -v "$PWD/target:/workspace/target" lifebank-builder

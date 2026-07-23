@@ -6,11 +6,13 @@ use soroban_sdk::{testutils::Ledger as _, testutils::Address as _, testutils::Ev
 const DAY: u64 = 24 * 3600;
 const ENTITY: u64 = 1;
 
-fn setup() -> (Env, Address) {
+fn setup() -> (Env, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let cid = env.register(ReputationContract, ());
-    (env, cid)
+    let admin = Address::generate(&env);
+    // Pass constructor args — atomic deploy+init.
+    let cid = env.register(ReputationContract, (&admin,));
+    (env, cid, admin)
 }
 
 use soroban_sdk::Address;
@@ -24,10 +26,9 @@ fn test_initialize_sets_default_configuration() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let cid = env.register(ReputationContract, ());
+    // Use __constructor via register args.
+    let cid = env.register(ReputationContract, (&admin,));
     let c = client(&env, &cid);
-
-    c.initialize(&admin);
 
     assert!(c.is_initialized());
     assert_eq!(c.get_admin(), admin);
@@ -62,10 +63,8 @@ fn test_initialize_emits_event() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let cid = env.register(ReputationContract, ());
+    let cid = env.register(ReputationContract, (&admin,));
     let c = client(&env, &cid);
-
-    c.initialize(&admin);
 
     assert_eq!(env.events().all().len(), 1);
 }
@@ -75,10 +74,8 @@ fn test_initialize_cannot_run_twice() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let cid = env.register(ReputationContract, ());
+    let cid = env.register(ReputationContract, (&admin,));
     let c = client(&env, &cid);
-
-    c.initialize(&admin);
 
     assert_eq!(c.try_initialize(&admin), Err(Ok(Error::AlreadyInitialized)));
 }
@@ -107,7 +104,7 @@ fn test_init_getters_fail_before_initialization() {
 
 #[test]
 fn test_submit_rating_rejects_zero() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let result = c.try_submit_rating(&ENTITY, &0, &1000);
     assert!(result.is_err());
@@ -115,7 +112,7 @@ fn test_submit_rating_rejects_zero() {
 
 #[test]
 fn test_submit_rating_rejects_six() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let result = c.try_submit_rating(&ENTITY, &6, &1000);
     assert!(result.is_err());
@@ -123,7 +120,7 @@ fn test_submit_rating_rejects_six() {
 
 #[test]
 fn test_submit_rating_accepts_valid_range() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
     for score in 1i64..=5 {
@@ -135,7 +132,7 @@ fn test_submit_rating_accepts_valid_range() {
 
 #[test]
 fn test_all_five_star_ratings_give_max_rating_component() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -149,7 +146,7 @@ fn test_all_five_star_ratings_give_max_rating_component() {
 
 #[test]
 fn test_all_one_star_ratings_give_zero_rating_component() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -163,7 +160,7 @@ fn test_all_one_star_ratings_give_zero_rating_component() {
 
 #[test]
 fn test_three_star_ratings_give_midpoint_rating_component() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -177,7 +174,7 @@ fn test_three_star_ratings_give_midpoint_rating_component() {
 
 #[test]
 fn test_recency_weighting_boosts_recent_ratings() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
 
     // Old 1-star rating (beyond half-life)
@@ -199,7 +196,7 @@ fn test_recency_weighting_boosts_recent_ratings() {
 
 #[test]
 fn test_old_ratings_get_half_weight() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
 
     // Two old 5-star ratings (beyond half-life)
@@ -216,7 +213,7 @@ fn test_old_ratings_get_half_weight() {
 
 #[test]
 fn test_no_ratings_gives_neutral_rating_component() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -231,7 +228,7 @@ fn test_no_ratings_gives_neutral_rating_component() {
 
 #[test]
 fn test_perfect_completion_rate() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -245,7 +242,7 @@ fn test_perfect_completion_rate() {
 
 #[test]
 fn test_zero_completion_rate() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -259,7 +256,7 @@ fn test_zero_completion_rate() {
 
 #[test]
 fn test_half_completion_rate() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -274,7 +271,7 @@ fn test_half_completion_rate() {
 
 #[test]
 fn test_no_assignments_gives_neutral_completion() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -288,7 +285,7 @@ fn test_no_assignments_gives_neutral_completion() {
 
 #[test]
 fn test_fast_response_gives_max_score() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -301,7 +298,7 @@ fn test_fast_response_gives_max_score() {
 
 #[test]
 fn test_slow_response_gives_zero_score() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -314,7 +311,7 @@ fn test_slow_response_gives_zero_score() {
 
 #[test]
 fn test_midpoint_response_time() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -328,7 +325,7 @@ fn test_midpoint_response_time() {
 
 #[test]
 fn test_no_response_data_gives_neutral() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -342,7 +339,7 @@ fn test_no_response_data_gives_neutral() {
 
 #[test]
 fn test_consistent_ratings_give_high_bonus() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -357,7 +354,7 @@ fn test_consistent_ratings_give_high_bonus() {
 
 #[test]
 fn test_inconsistent_ratings_give_no_bonus() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -373,7 +370,7 @@ fn test_inconsistent_ratings_give_no_bonus() {
 
 #[test]
 fn test_fewer_than_three_ratings_no_bonus() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -388,7 +385,7 @@ fn test_fewer_than_three_ratings_no_bonus() {
 
 #[test]
 fn test_single_fraud_flag_applies_penalty() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -402,7 +399,7 @@ fn test_single_fraud_flag_applies_penalty() {
 
 #[test]
 fn test_fraud_penalty_is_capped() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -419,7 +416,7 @@ fn test_fraud_penalty_is_capped() {
 
 #[test]
 fn test_no_fraud_flags_zero_penalty() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -431,7 +428,7 @@ fn test_no_fraud_flags_zero_penalty() {
 
 #[test]
 fn test_flag_fraud_on_unknown_entity_returns_error() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let result = c.try_flag_fraud(&999u64, &1000);
     assert!(result.is_err());
@@ -441,7 +438,7 @@ fn test_flag_fraud_on_unknown_entity_returns_error() {
 
 #[test]
 fn test_no_decay_when_recently_active() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
 
     let now = 1000u64;
@@ -454,7 +451,7 @@ fn test_no_decay_when_recently_active() {
 
 #[test]
 fn test_decay_increases_with_inactivity() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
 
     // Last active at t=0
@@ -471,7 +468,7 @@ fn test_decay_increases_with_inactivity() {
 
 #[test]
 fn test_decay_is_capped_at_max() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
 
     // Last active at t=0
@@ -490,7 +487,7 @@ fn test_decay_is_capped_at_max() {
 
 #[test]
 fn test_score_never_exceeds_max() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -506,7 +503,7 @@ fn test_score_never_exceeds_max() {
 
 #[test]
 fn test_score_never_goes_below_zero() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -532,14 +529,14 @@ fn test_score_never_goes_below_zero() {
 
 #[test]
 fn test_get_score_returns_none_for_unknown_entity() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     assert!(c.get_score(&999u64).is_none());
 }
 
 #[test]
 fn test_get_input_returns_stored_data() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -556,7 +553,7 @@ fn test_get_input_returns_stored_data() {
 
 #[test]
 fn test_ratings_capped_at_100() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -572,7 +569,7 @@ fn test_ratings_capped_at_100() {
 
 #[test]
 fn test_calculate_reputation_emits_event() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
@@ -586,7 +583,7 @@ fn test_calculate_reputation_emits_event() {
 
 #[test]
 fn test_high_performer_gets_high_score() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let now = 1000u64;
     env.ledger().with_mut(|l| l.timestamp = now);
@@ -607,7 +604,7 @@ fn test_high_performer_gets_high_score() {
 
 #[test]
 fn test_poor_performer_gets_low_score() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let now = 1000u64;
     env.ledger().with_mut(|l| l.timestamp = now);
@@ -647,7 +644,7 @@ fn test_admin_initialization() {
 
 #[test]
 fn test_apply_penalty_requires_admin() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let admin = Address::generate(&env);
     let _not_admin = Address::generate(&env);
@@ -665,7 +662,7 @@ fn test_apply_penalty_requires_admin() {
 
 #[test]
 fn test_penalty_system_impacts_score() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let admin = Address::generate(&env);
     c.init(&admin);
@@ -683,7 +680,7 @@ fn test_penalty_system_impacts_score() {
 
 #[test]
 fn test_time_based_penalty_recovery() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let admin = Address::generate(&env);
     c.init(&admin);
@@ -707,7 +704,7 @@ fn test_time_based_penalty_recovery() {
 
 #[test]
 fn test_penalty_expiry() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let admin = Address::generate(&env);
     c.init(&admin);
@@ -729,7 +726,7 @@ fn test_penalty_expiry() {
 
 #[test]
 fn test_appeals_system() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let admin = Address::generate(&env);
     c.init(&admin);
@@ -755,7 +752,7 @@ fn test_appeals_system() {
 
 #[test]
 fn test_resolve_penalty_marks_as_resolved() {
-    let (env, cid) = setup();
+    let (env, cid, _admin) = setup();
     let c = client(&env, &cid);
     let admin = Address::generate(&env);
     c.init(&admin);
@@ -779,10 +776,8 @@ fn test_resolve_penalty_marks_as_resolved() {
 
 #[test]
 fn test_reputation_pause_blocks_submit_rating() {
-    let (env, cid) = setup();
+    let (env, cid, admin) = setup();
     let c = client(&env, &cid);
-    let admin = Address::generate(&env);
-    c.initialize(&admin);
 
     c.pause(&admin);
     assert!(c.is_paused());
@@ -793,10 +788,8 @@ fn test_reputation_pause_blocks_submit_rating() {
 
 #[test]
 fn test_reputation_pause_allows_get_score() {
-    let (env, cid) = setup();
+    let (env, cid, admin) = setup();
     let c = client(&env, &cid);
-    let admin = Address::generate(&env);
-    c.initialize(&admin);
 
     // Submit a rating before pausing
     c.submit_rating(&ENTITY, &4i64, &1000u64);
@@ -809,10 +802,8 @@ fn test_reputation_pause_allows_get_score() {
 
 #[test]
 fn test_reputation_unpause_restores_writes() {
-    let (env, cid) = setup();
+    let (env, cid, admin) = setup();
     let c = client(&env, &cid);
-    let admin = Address::generate(&env);
-    c.initialize(&admin);
 
     c.pause(&admin);
     c.unpause(&admin);
@@ -825,10 +816,8 @@ fn test_reputation_unpause_restores_writes() {
 #[test]
 #[should_panic]
 fn test_reputation_non_admin_cannot_pause() {
-    let (env, cid) = setup();
+    let (env, cid, admin) = setup();
     let c = client(&env, &cid);
-    let admin = Address::generate(&env);
-    c.initialize(&admin);
 
     let attacker = Address::generate(&env);
     c.pause(&attacker);

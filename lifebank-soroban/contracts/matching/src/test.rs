@@ -481,14 +481,13 @@ mod contract_tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register(MatchingContract, ());
-        let client = MatchingContractClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
         let inventory = Address::generate(&env);
         let requests = Address::generate(&env);
 
-        client.initialize(&admin, &inventory, &requests);
+        // Pass constructor args at register time — atomic deploy+init.
+        let contract_id = env.register(MatchingContract, (&admin, &inventory, &requests));
+        let client = MatchingContractClient::new(&env, &contract_id);
 
         (env, client, admin, inventory, requests)
     }
@@ -558,12 +557,12 @@ mod circuit_breaker_tests {
     fn setup<'a>() -> (Env, MatchingContractClient<'a>, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(MatchingContract, ());
-        let client = MatchingContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let inventory = Address::generate(&env);
         let requests = Address::generate(&env);
-        client.initialize(&admin, &inventory, &requests);
+        // Atomic deploy+init via __constructor.
+        let contract_id = env.register(MatchingContract, (&admin, &inventory, &requests));
+        let client = MatchingContractClient::new(&env, &contract_id);
         (env, client, admin)
     }
 
