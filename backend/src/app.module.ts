@@ -37,6 +37,7 @@ import { MapsModule } from './maps/maps.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PolicyCenterModule } from './policy-center/policy-center.module';
 import { ProofBundleModule } from './proof-bundle/proof-bundle.module';
+import { ProofCommitmentModule } from './proof-commitment/proof-commitment.module';
 import { ReconciliationModule } from './reconciliation/reconciliation.module';
 import { RouteDeviationModule } from './route-deviation/route-deviation.module';
 import { FileMetadataModule } from './file-metadata/file-metadata.module';
@@ -122,6 +123,7 @@ import type Redis from 'ioredis';
     MapsModule,
     TransparencyModule,
     ProofBundleModule,
+    ProofCommitmentModule,
     PolicyCenterModule,
     ReconciliationModule,
     RouteDeviationModule,
