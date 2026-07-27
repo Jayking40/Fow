@@ -1,12 +1,15 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Bytes, Env,
-    Map, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Bytes,
+    BytesN, Env, Map, String, Symbol, Vec,
 };
 
 pub mod constants;
 pub mod payments;
 use crate::payments::*;
+
+pub mod proof_delivery;
+use crate::proof_delivery::*;
 
 pub mod registry_read;
 pub mod registry_write;
@@ -72,6 +75,33 @@ pub enum Error {
     InvalidMultiSigConfig = 30,
     DuplicateApproval = 31,
     EscrowNotReleasable = 32,
+
+    // ── Proof-commitment & delivery-attestation errors ──────────────────────
+    /// A proof commitment already exists for this workflow and cannot be
+    /// silently overwritten; use the supersede path instead.
+    ProofAlreadyCommitted = 33,
+    /// The proof commitment was not found for the given workflow ID.
+    ProofNotFound = 34,
+    /// Courier attestation is required but has not been submitted.
+    CourierAttestationMissing = 35,
+    /// Facility attestation is required but has not been submitted.
+    FacilityAttestationMissing = 36,
+    /// The caller is not the courier recorded on the commitment.
+    NotCourier = 37,
+    /// The caller is not the facility recorded on the commitment.
+    NotFacility = 38,
+    /// The proof commitment is already in a confirmed/delivered state.
+    ProofAlreadyConfirmed = 39,
+    /// The facility confirmation window has expired.
+    FacilityWindowExpired = 40,
+    /// Amendment requires arbiter approval which has not been provided.
+    ArbiterApprovalRequired = 41,
+    /// A custody chain link for this workflow has already been recorded.
+    CustodyLinkExists = 42,
+    /// The previous hash supplied does not match the tip of the custody chain.
+    CustodyChainBreak = 43,
+    /// Scheme version is unknown or unsupported.
+    UnknownSchemeVersion = 44,
 }
 
 // Alias for issue/docs terminology.
@@ -497,6 +527,12 @@ const MULTISIG_CONFIG_KEY: &str = "MSIG_CFG";
 const PENDING_APPROVALS_KEY: &str = "PEND_APR";
 const ESCROW_ACCOUNTS_KEY: &str = "ESC_ACCS";
 
+// Proof-commitment storage key strings
+const PROOF_COMMITS_KEY: &str = "PROOF_CMT";
+const PROOF_SCHEMES_KEY: &str = "PRF_SCMS";
+const CUSTODY_CHAIN_KEY: &str = "CUST_CHN";
+const NEXT_COMMIT_ID_KEY: &str = "NXT_CMT";
+
 const _: () = assert!(BLOOD_UNITS_KEY.len() <= 9);
 const _: () = assert!(NEXT_ID_KEY.len() <= 9);
 const _: () = assert!(BLOOD_BANKS_KEY.len() <= 9);
@@ -518,6 +554,10 @@ const _: () = assert!(PAYMENT_STATS_KEY.len() <= 9);
 const _: () = assert!(MULTISIG_CONFIG_KEY.len() <= 9);
 const _: () = assert!(PENDING_APPROVALS_KEY.len() <= 9);
 const _: () = assert!(ESCROW_ACCOUNTS_KEY.len() <= 9);
+const _: () = assert!(PROOF_COMMITS_KEY.len() <= 9);
+const _: () = assert!(PROOF_SCHEMES_KEY.len() <= 9);
+const _: () = assert!(CUSTODY_CHAIN_KEY.len() <= 9);
+const _: () = assert!(NEXT_COMMIT_ID_KEY.len() <= 9);
 
 /// Storage keys (single source of truth)
 pub(crate) const BLOOD_UNITS: Symbol = symbol_short!("UNITS");
@@ -541,6 +581,12 @@ pub(crate) const PAYMENT_STATS: Symbol = symbol_short!("PAY_STATS");
 pub(crate) const MULTISIG_CONFIG: Symbol = symbol_short!("MSIG_CFG");
 pub(crate) const PENDING_APPROVALS: Symbol = symbol_short!("PEND_APR");
 pub(crate) const ESCROW_ACCOUNTS: Symbol = symbol_short!("ESC_ACCS");
+
+// Proof-commitment storage symbols
+pub(crate) const PROOF_COMMITS: Symbol = symbol_short!("PROOF_CMT");
+pub(crate) const PROOF_SCHEMES: Symbol = symbol_short!("PRF_SCMS");
+pub(crate) const CUSTODY_CHAIN: Symbol = symbol_short!("CUST_CHN");
+pub(crate) const NEXT_COMMIT_ID: Symbol = symbol_short!("NXT_CMT");
 /// Storage key enumeration for composite keys
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -3761,12 +3807,645 @@ impl HealthChainContract {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROOF-COMMITMENT & DUAL-ATTESTATION IMPL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[contractimpl]
+impl HealthChainContract {
+    // ── Scheme registry ────────────────────────────────────────────────────
+
+    /// Register a new Merkle proof scheme version (admin only).
+    pub fn register_proof_scheme(
+        env: Env,
+        version: u32,
+        description: String,
+    ) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
+        let mut schemes: Map<u32, SchemeEntry> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_SCHEMES)
+            .unwrap_or(Map::new(&env));
+
+        let entry = SchemeEntry {
+            version,
+            description,
+            active: true,
+            registered_at: env.ledger().timestamp(),
+        };
+        schemes.set(version, entry);
+        env.storage().persistent().set(&PROOF_SCHEMES, &schemes);
+        Ok(())
+    }
+
+    /// Deactivate a proof scheme version (admin only).
+    pub fn deactivate_proof_scheme(env: Env, version: u32) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
+        let mut schemes: Map<u32, SchemeEntry> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_SCHEMES)
+            .ok_or(Error::UnknownSchemeVersion)?;
+
+        let mut entry = schemes.get(version).ok_or(Error::UnknownSchemeVersion)?;
+        entry.active = false;
+        schemes.set(version, entry);
+        env.storage().persistent().set(&PROOF_SCHEMES, &schemes);
+        Ok(())
+    }
+
+    /// Get a scheme entry by version.
+    pub fn get_proof_scheme(env: Env, version: u32) -> Result<SchemeEntry, Error> {
+        let schemes: Map<u32, SchemeEntry> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_SCHEMES)
+            .unwrap_or(Map::new(&env));
+        schemes.get(version).ok_or(Error::UnknownSchemeVersion)
+    }
+
+    // ── Step 1: courier submits bundle hash ────────────────────────────────
+
+    /// Submit a proof commitment from the courier (step 1 of dual-attestation).
+    ///
+    /// `bundle_hash` is the SHA-256 Merkle root of the off-chain bundle.
+    /// Returns the new `commitment_id`.
+    pub fn submit_proof_commitment(
+        env: Env,
+        courier: Address,
+        facility: Address,
+        workflow_id: String,
+        bundle_hash: BytesN<32>,
+        scheme_version: u32,
+    ) -> Result<u64, Error> {
+        courier.require_auth();
+
+        // Validate scheme version is known and active.
+        let schemes: Map<u32, SchemeEntry> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_SCHEMES)
+            .unwrap_or(Map::new(&env));
+        let scheme = schemes.get(scheme_version).ok_or(Error::UnknownSchemeVersion)?;
+        if !scheme.active {
+            return Err(Error::UnknownSchemeVersion);
+        }
+
+        // No existing ACTIVE commitment for this workflow.
+        let history_key = ProofKey::WorkflowHistory(workflow_id.clone());
+        let history: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or(Vec::new(&env));
+
+        let commits: Map<u64, ProofCommitment> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_COMMITS)
+            .unwrap_or(Map::new(&env));
+
+        for i in 0..history.len() {
+            let cid = history.get(i).unwrap();
+            if let Some(c) = commits.get(cid) {
+                if c.status == ProofCommitmentStatus::PendingFacility
+                    || c.status == ProofCommitmentStatus::Confirmed
+                {
+                    return Err(Error::ProofAlreadyCommitted);
+                }
+            }
+        }
+
+        let commitment_id = Self::next_commitment_id(&env);
+        let now = env.ledger().timestamp();
+        let facility_deadline = now.saturating_add(FACILITY_CONFIRM_WINDOW_SECS);
+
+        let commitment = ProofCommitment {
+            commitment_id,
+            workflow_id: workflow_id.clone(),
+            bundle_hash: bundle_hash.clone(),
+            scheme_version,
+            courier: courier.clone(),
+            facility: facility.clone(),
+            status: ProofCommitmentStatus::PendingFacility,
+            submitted_at: now,
+            confirmed_at: None,
+            facility_deadline,
+            superseded_by: None,
+            supersede_reason: None,
+        };
+
+        let mut commits: Map<u64, ProofCommitment> = commits;
+        commits.set(commitment_id, commitment.clone());
+        env.storage().persistent().set(&PROOF_COMMITS, &commits);
+
+        let mut history: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or(Vec::new(&env));
+        history.push_back(commitment_id);
+        env.storage().persistent().set(&history_key, &history);
+
+        env.events().publish(
+            (
+                symbol_short!("proof"),
+                symbol_short!("submit"),
+                symbol_short!("v1"),
+            ),
+            ProofSubmittedEvent {
+                commitment_id,
+                workflow_id,
+                bundle_hash,
+                scheme_version,
+                courier,
+                facility,
+                submitted_at: now,
+                facility_deadline,
+            },
+        );
+
+        Ok(commitment_id)
+    }
+
+    // ── Step 2: facility confirms ──────────────────────────────────────────
+
+    /// Confirm a pending proof commitment from the receiving facility.
+    ///
+    /// Both courier AND facility must attest before the commitment is
+    /// `Confirmed` and settlement-eligible. Fails with `FacilityWindowExpired`
+    /// if the 4-hour window has passed.
+    pub fn confirm_proof_commitment(
+        env: Env,
+        facility: Address,
+        commitment_id: u64,
+    ) -> Result<(), Error> {
+        facility.require_auth();
+
+        let mut commits: Map<u64, ProofCommitment> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_COMMITS)
+            .ok_or(Error::ProofNotFound)?;
+
+        let mut commitment = commits.get(commitment_id).ok_or(Error::ProofNotFound)?;
+
+        if commitment.facility != facility {
+            return Err(Error::NotFacility);
+        }
+
+        if commitment.status != ProofCommitmentStatus::PendingFacility {
+            return Err(Error::ProofAlreadyConfirmed);
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= commitment.facility_deadline {
+            return Err(Error::FacilityWindowExpired);
+        }
+
+        commitment.status = ProofCommitmentStatus::Confirmed;
+        commitment.confirmed_at = Some(now);
+
+        commits.set(commitment_id, commitment.clone());
+        env.storage().persistent().set(&PROOF_COMMITS, &commits);
+
+        env.events().publish(
+            (
+                symbol_short!("proof"),
+                symbol_short!("confirm"),
+                symbol_short!("v1"),
+            ),
+            ProofConfirmedEvent {
+                commitment_id,
+                workflow_id: commitment.workflow_id,
+                bundle_hash: commitment.bundle_hash,
+                facility,
+                confirmed_at: now,
+            },
+        );
+
+        Ok(())
+    }
+
+    // ── Merkle inclusion verification (read-only, permissionless) ──────────
+
+    /// Verify that `leaf_hash` is included in the committed bundle Merkle tree.
+    ///
+    /// `proof` is the ordered list of sibling hashes leaf→root.
+    /// Returns `true` if the leaf is provably in the committed bundle.
+    pub fn verify_inclusion(
+        env: Env,
+        commitment_id: u64,
+        leaf_hash: BytesN<32>,
+        proof: Vec<BytesN<32>>,
+    ) -> Result<bool, Error> {
+        let commits: Map<u64, ProofCommitment> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_COMMITS)
+            .ok_or(Error::ProofNotFound)?;
+
+        let commitment = commits.get(commitment_id).ok_or(Error::ProofNotFound)?;
+        let computed_root = Self::compute_merkle_root(&env, leaf_hash, proof);
+        Ok(computed_root == commitment.bundle_hash)
+    }
+
+    /// Get a proof commitment by ID.
+    pub fn get_proof_commitment(
+        env: Env,
+        commitment_id: u64,
+    ) -> Result<ProofCommitment, Error> {
+        let commits: Map<u64, ProofCommitment> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_COMMITS)
+            .ok_or(Error::ProofNotFound)?;
+        commits.get(commitment_id).ok_or(Error::ProofNotFound)
+    }
+
+    /// Get the full commitment-ID history for a workflow (oldest first).
+    pub fn get_workflow_proof_history(env: Env, workflow_id: String) -> Vec<u64> {
+        let history_key = ProofKey::WorkflowHistory(workflow_id);
+        env.storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ── Supersede-only amendment ───────────────────────────────────────────
+
+    /// Supersede a confirmed proof commitment (arbiter/admin required).
+    ///
+    /// Old commitment transitions to `Superseded`; both records are retained.
+    /// Returns the new `commitment_id`.
+    pub fn supersede_proof_commitment(
+        env: Env,
+        arbiter: Address,
+        old_commitment_id: u64,
+        new_bundle_hash: BytesN<32>,
+        reason: String,
+    ) -> Result<u64, Error> {
+        arbiter.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        if arbiter != admin {
+            return Err(Error::ArbiterApprovalRequired);
+        }
+
+        let mut commits: Map<u64, ProofCommitment> = env
+            .storage()
+            .persistent()
+            .get(&PROOF_COMMITS)
+            .ok_or(Error::ProofNotFound)?;
+
+        let mut old = commits.get(old_commitment_id).ok_or(Error::ProofNotFound)?;
+
+        if old.status != ProofCommitmentStatus::Confirmed {
+            return Err(Error::InvalidStatus);
+        }
+
+        let new_commitment_id = Self::next_commitment_id(&env);
+        let now = env.ledger().timestamp();
+        let facility_deadline = now.saturating_add(FACILITY_CONFIRM_WINDOW_SECS);
+
+        let new_commitment = ProofCommitment {
+            commitment_id: new_commitment_id,
+            workflow_id: old.workflow_id.clone(),
+            bundle_hash: new_bundle_hash,
+            scheme_version: old.scheme_version,
+            courier: old.courier.clone(),
+            facility: old.facility.clone(),
+            status: ProofCommitmentStatus::PendingFacility,
+            submitted_at: now,
+            confirmed_at: None,
+            facility_deadline,
+            superseded_by: None,
+            supersede_reason: None,
+        };
+
+        old.status = ProofCommitmentStatus::Superseded;
+        old.superseded_by = Some(new_commitment_id);
+        old.supersede_reason = Some(reason.clone());
+
+        commits.set(old_commitment_id, old.clone());
+        commits.set(new_commitment_id, new_commitment);
+        env.storage().persistent().set(&PROOF_COMMITS, &commits);
+
+        let history_key = ProofKey::WorkflowHistory(old.workflow_id.clone());
+        let mut history: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or(Vec::new(&env));
+        history.push_back(new_commitment_id);
+        env.storage().persistent().set(&history_key, &history);
+
+        env.events().publish(
+            (
+                symbol_short!("proof"),
+                symbol_short!("supersede"),
+                symbol_short!("v1"),
+            ),
+            ProofSupersededEvent {
+                old_commitment_id,
+                new_commitment_id,
+                workflow_id: old.workflow_id.clone(),
+                reason,
+                arbiter,
+                superseded_at: now,
+            },
+        );
+
+        Ok(new_commitment_id)
+    }
+
+    // ── Hash-linked custody chain ──────────────────────────────────────────
+
+    /// Append a hash-linked custody handoff to a workflow's custody chain.
+    ///
+    /// Pass zero-filled 32 bytes for `prev_link_hash` on the genesis link (index 0).
+    /// Returns the new `link_hash` for the caller to supply on the next call.
+    pub fn append_custody_link(
+        env: Env,
+        from_actor: Address,
+        to_actor: Address,
+        workflow_id: String,
+        prev_link_hash: BytesN<32>,
+    ) -> Result<BytesN<32>, Error> {
+        from_actor.require_auth();
+
+        let chain_key = ProofKey::CustodyChain(workflow_id.clone());
+        let mut chain: Vec<CustodyChainLink> = env
+            .storage()
+            .persistent()
+            .get(&chain_key)
+            .unwrap_or(Vec::new(&env));
+
+        let index = chain.len() as u32;
+        let now = env.ledger().timestamp();
+        let zero_hash: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
+
+        if index == 0 {
+            if prev_link_hash != zero_hash {
+                return Err(Error::CustodyChainBreak);
+            }
+        } else {
+            let last = chain.get(index - 1).ok_or(Error::StorageError)?;
+            if prev_link_hash != last.link_hash {
+                return Err(Error::CustodyChainBreak);
+            }
+        }
+
+        let link_hash = Self::compute_link_hash(
+            &env,
+            index,
+            &workflow_id,
+            &prev_link_hash,
+            &from_actor,
+            &to_actor,
+            now,
+        );
+
+        let link = CustodyChainLink {
+            index,
+            workflow_id: workflow_id.clone(),
+            prev_link_hash,
+            link_hash: link_hash.clone(),
+            from_actor: from_actor.clone(),
+            to_actor: to_actor.clone(),
+            handoff_at: now,
+        };
+
+        chain.push_back(link);
+        env.storage().persistent().set(&chain_key, &chain);
+
+        env.events().publish(
+            (
+                symbol_short!("custody"),
+                symbol_short!("link"),
+                symbol_short!("v1"),
+            ),
+            CustodyLinkAppendedEvent {
+                workflow_id,
+                index,
+                link_hash: link_hash.clone(),
+                from_actor,
+                to_actor,
+                handoff_at: now,
+            },
+        );
+
+        Ok(link_hash)
+    }
+
+    /// Return the full custody chain for a workflow.
+    pub fn get_custody_chain(env: Env, workflow_id: String) -> Vec<CustodyChainLink> {
+        let chain_key = ProofKey::CustodyChain(workflow_id);
+        env.storage()
+            .persistent()
+            .get(&chain_key)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Verify the custody chain is gap-free and hash-linked.
+    ///
+    /// Read-only, permissionless — any third-party auditor may call this.
+    pub fn verify_custody_chain(env: Env, workflow_id: String) -> bool {
+        let chain_key = ProofKey::CustodyChain(workflow_id.clone());
+        let chain: Vec<CustodyChainLink> = env
+            .storage()
+            .persistent()
+            .get(&chain_key)
+            .unwrap_or(Vec::new(&env));
+
+        if chain.is_empty() {
+            return true;
+        }
+
+        let zero_hash: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
+
+        for i in 0..chain.len() {
+            let link = chain.get(i).unwrap();
+
+            if i == 0 && link.prev_link_hash != zero_hash {
+                return false;
+            }
+
+            if i > 0 {
+                let prev = chain.get(i - 1).unwrap();
+                if link.prev_link_hash != prev.link_hash {
+                    return false;
+                }
+            }
+
+            let expected = Self::compute_link_hash(
+                &env,
+                link.index,
+                &link.workflow_id,
+                &link.prev_link_hash,
+                &link.from_actor,
+                &link.to_actor,
+                link.handoff_at,
+            );
+            if link.link_hash != expected {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    // ── Private helpers ────────────────────────────────────────────────────
+
+    fn next_commitment_id(env: &Env) -> u64 {
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&NEXT_COMMIT_ID)
+            .unwrap_or(1u64);
+        env.storage().instance().set(&NEXT_COMMIT_ID, &(id + 1));
+        id
+    }
+
+    /// Standard binary Merkle root computation.
+    /// Pair hash: SHA256(lex_min(a,b) ∥ lex_max(a,b))
+    fn compute_merkle_root(
+        env: &Env,
+        leaf_hash: BytesN<32>,
+        proof: Vec<BytesN<32>>,
+    ) -> BytesN<32> {
+        use soroban_sdk::Bytes;
+
+        let mut current = leaf_hash;
+
+        for i in 0..proof.len() {
+            let sibling = proof.get(i).unwrap();
+            let mut pair = Bytes::new(env);
+
+            let current_gt = Self::bytes32_gt(&current, &sibling);
+            let (left, right) = if current_gt {
+                (sibling.clone(), current.clone())
+            } else {
+                (current.clone(), sibling.clone())
+            };
+
+            for j in 0..32u32 {
+                pair.push_back(left.get(j).unwrap());
+            }
+            for j in 0..32u32 {
+                pair.push_back(right.get(j).unwrap());
+            }
+
+            current = env.crypto().sha256(&pair).into();
+        }
+
+        current
+    }
+
+    fn bytes32_gt(a: &BytesN<32>, b: &BytesN<32>) -> bool {
+        for i in 0..32u32 {
+            let av = a.get(i).unwrap();
+            let bv = b.get(i).unwrap();
+            if av > bv { return true; }
+            if av < bv { return false; }
+        }
+        false
+    }
+
+    /// Compute a deterministic link hash.
+    ///
+    /// Input: index(4B BE) ∥ workflow_id_bytes ∥ prev_hash(32B)
+    ///        ∥ SHA256(from_actor XDR)(32B) ∥ SHA256(to_actor XDR)(32B)
+    ///        ∥ handoff_at(8B BE)
+    ///
+    /// Addresses are hashed via their XDR encoding (`ToXdr::to_xdr(&env)`)
+    /// which is stable, deterministic, and reproducible off-chain given the
+    /// same bech32 address string.
+    fn compute_link_hash(
+        env: &Env,
+        index: u32,
+        workflow_id: &String,
+        prev_hash: &BytesN<32>,
+        from_actor: &Address,
+        to_actor: &Address,
+        handoff_at: u64,
+    ) -> BytesN<32> {
+        use soroban_sdk::Bytes;
+
+        // Hash each address to get a stable 32-byte digest.
+        let from_digest: BytesN<32> = Self::hash_address(env, from_actor);
+        let to_digest: BytesN<32>   = Self::hash_address(env, to_actor);
+
+        let mut input = Bytes::new(env);
+
+        // index — 4 bytes big-endian
+        for b in index.to_be_bytes().iter() {
+            input.push_back(*b);
+        }
+
+        // workflow_id — variable length UTF-8 bytes
+        let wf_bytes = workflow_id.to_bytes();
+        for i in 0..wf_bytes.len() {
+            input.push_back(wf_bytes.get(i).unwrap());
+        }
+
+        // prev_hash — 32 bytes
+        for i in 0..32u32 {
+            input.push_back(prev_hash.get(i).unwrap());
+        }
+
+        // from_actor digest — 32 bytes
+        for i in 0..32u32 {
+            input.push_back(from_digest.get(i).unwrap());
+        }
+
+        // to_actor digest — 32 bytes
+        for i in 0..32u32 {
+            input.push_back(to_digest.get(i).unwrap());
+        }
+
+        // handoff_at — 8 bytes big-endian
+        for b in handoff_at.to_be_bytes().iter() {
+            input.push_back(*b);
+        }
+
+        env.crypto().sha256(&input).into()
+    }
+
+    /// Produce a stable 32-byte digest for an `Address` by hashing its
+    /// XDR-encoded bytes.  `Address::to_xdr(&env)` is available in
+    /// soroban-sdk via the `ToXdr` trait and produces a deterministic,
+    /// reproducible byte sequence.
+    fn hash_address(env: &Env, addr: &Address) -> BytesN<32> {
+        use soroban_sdk::xdr::ToXdr;
+        let xdr_bytes = addr.to_xdr(env);
+        env.crypto().sha256(&xdr_bytes).into()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use soroban_sdk::{
-        symbol_short, testutils::Address as _, testutils::Events, testutils::Ledger as _, Address,
-        Env, IntoVal, String, Symbol, TryFromVal,
+        symbol_short, testutils::Address as _, testutils::Events, testutils::Ledger as _, vec,
+        Address, Bytes, Env, IntoVal, String, Symbol, TryFromVal, Vec,
     };
 
     fn setup_contract_with_admin(env: &Env) -> (Address, Address, HealthChainContractClient<'_>) {
@@ -7341,5 +8020,400 @@ mod test {
         env.mock_all_auths();
         client.activate_blood_bank(&admin, &bank);
         assert_eq!(client.is_blood_bank(&bank), true);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PROOF-COMMITMENT & DUAL-ATTESTATION TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn setup_proof_env(
+        env: &Env,
+    ) -> (
+        Address,              // contract_id
+        Address,              // admin
+        Address,              // courier
+        Address,              // facility
+        HealthChainContractClient<'_>,
+    ) {
+        let (contract_id, admin, client) = setup_contract_with_admin(env);
+        let courier = Address::generate(env);
+        let facility = Address::generate(env);
+        // Register scheme v1
+        env.mock_all_auths();
+        client.register_proof_scheme(&1u32, &String::from_str(env, "sha256-merkle-v1"));
+        (contract_id, admin, courier, facility, client)
+    }
+
+    fn make_workflow_id(env: &Env) -> soroban_sdk::String {
+        soroban_sdk::String::from_str(env, "wf-001")
+    }
+
+    fn make_bundle_hash(env: &Env, seed: u8) -> soroban_sdk::BytesN<32> {
+        let arr = [seed; 32];
+        soroban_sdk::BytesN::from_array(env, &arr)
+    }
+
+    // ── happy-path dual attestation ──────────────────────────────────────
+
+    #[test]
+    fn test_submit_and_confirm_proof_commitment_success() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let bundle_hash = make_bundle_hash(&env, 0xab);
+
+        env.mock_all_auths();
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &bundle_hash, &1u32,
+        );
+        assert_eq!(cid, 1);
+
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&facility, &cid);
+
+        let commitment = client.get_proof_commitment(&cid);
+        assert_eq!(commitment.status, ProofCommitmentStatus::Confirmed);
+        assert!(commitment.confirmed_at.is_some());
+    }
+
+    // ── AC: single-party cannot confirm ─────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #38)")]  // NotFacility
+    fn test_forged_single_party_courier_confirm_fails() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let bundle_hash = make_bundle_hash(&env, 0x01);
+
+        env.mock_all_auths();
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &bundle_hash, &1u32,
+        );
+
+        // Courier tries to confirm their own submission — must fail NotFacility
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&courier, &cid);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #38)")]  // NotFacility
+    fn test_random_address_cannot_confirm_proof() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let bundle_hash = make_bundle_hash(&env, 0x02);
+        let rogue = Address::generate(&env);
+
+        env.mock_all_auths();
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &bundle_hash, &1u32,
+        );
+
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&rogue, &cid);
+    }
+
+    // ── facility window expiry ────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #40)")]  // FacilityWindowExpired
+    fn test_confirm_after_window_expiry_fails() {
+        let env = Env::default();
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let bundle_hash = make_bundle_hash(&env, 0x03);
+
+        env.mock_all_auths();
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &bundle_hash, &1u32,
+        );
+
+        // Advance past 4-hour window
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000 + 4 * 3_600 + 1);
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&facility, &cid);
+    }
+
+    // ── Merkle inclusion: correct leaf passes ─────────────────────────────
+
+    #[test]
+    fn test_verify_inclusion_correct_leaf_passes() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        // Build a two-leaf tree: leaves = [A, B]
+        // root = SHA256(lex_min(A,B) ∥ lex_max(A,B))
+        let leaf_a = make_bundle_hash(&env, 0x0a);
+        let leaf_b = make_bundle_hash(&env, 0x0b);
+
+        // Determine pair order (lex min first)
+        let (left, right) = {
+            let mut gt = false;
+            for i in 0..32u32 {
+                let av = leaf_a.get(i).unwrap();
+                let bv = leaf_b.get(i).unwrap();
+                if av > bv { gt = true; break; }
+                if av < bv { break; }
+            }
+            if gt { (leaf_b.clone(), leaf_a.clone()) } else { (leaf_a.clone(), leaf_b.clone()) }
+        };
+
+        let mut pair = Bytes::new(&env);
+        for i in 0..32u32 { pair.push_back(left.get(i).unwrap()); }
+        for i in 0..32u32 { pair.push_back(right.get(i).unwrap()); }
+        let root: soroban_sdk::BytesN<32> = env.crypto().sha256(&pair).into();
+
+        env.mock_all_auths();
+        let workflow_id = make_workflow_id(&env);
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &root, &1u32,
+        );
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&facility, &cid);
+
+        let proof = vec![&env, leaf_b.clone()];
+        let result = client.verify_inclusion(&cid, &leaf_a, &proof);
+        assert!(result, "Valid leaf should verify as included");
+    }
+
+    // ── AC: tampered leaf fails verify_inclusion ───────────────────────────
+
+    #[test]
+    fn test_verify_inclusion_tampered_leaf_fails() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let leaf_a = make_bundle_hash(&env, 0x0a);
+        let leaf_b = make_bundle_hash(&env, 0x0b);
+
+        let (left, right) = {
+            let mut gt = false;
+            for i in 0..32u32 {
+                let av = leaf_a.get(i).unwrap();
+                let bv = leaf_b.get(i).unwrap();
+                if av > bv { gt = true; break; }
+                if av < bv { break; }
+            }
+            if gt { (leaf_b.clone(), leaf_a.clone()) } else { (leaf_a.clone(), leaf_b.clone()) }
+        };
+
+        let mut pair = Bytes::new(&env);
+        for i in 0..32u32 { pair.push_back(left.get(i).unwrap()); }
+        for i in 0..32u32 { pair.push_back(right.get(i).unwrap()); }
+        let root: soroban_sdk::BytesN<32> = env.crypto().sha256(&pair).into();
+
+        env.mock_all_auths();
+        let workflow_id = make_workflow_id(&env);
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &root, &1u32,
+        );
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&facility, &cid);
+
+        // Submit tampered leaf (different seed)
+        let tampered = make_bundle_hash(&env, 0xff);
+        let proof = vec![&env, leaf_b.clone()];
+        let result = client.verify_inclusion(&cid, &tampered, &proof);
+        assert!(!result, "Tampered leaf must not verify as included");
+    }
+
+    // ── custody chain: happy path ─────────────────────────────────────────
+
+    #[test]
+    fn test_custody_chain_three_links_intact() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let zero_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        let bank = Address::generate(&env);
+        let rider = Address::generate(&env);
+
+        env.mock_all_auths();
+        // Link 0: bank → courier
+        let h0 = client.append_custody_link(&bank, &courier, &workflow_id, &zero_hash);
+
+        // Link 1: courier → rider
+        let h1 = client.append_custody_link(&courier, &rider, &workflow_id, &h0);
+
+        // Link 2: rider → facility
+        client.append_custody_link(&rider, &facility, &workflow_id, &h1);
+
+        let valid = client.verify_custody_chain(&workflow_id);
+        assert!(valid, "Three-link custody chain should verify as intact");
+
+        let chain = client.get_custody_chain(&workflow_id);
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain.get(0).unwrap().from_actor, bank);
+        assert_eq!(chain.get(2).unwrap().to_actor, facility);
+    }
+
+    // ── AC: broken custody link detected ──────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #43)")]  // CustodyChainBreak
+    fn test_broken_custody_link_wrong_prev_hash_rejected() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let zero_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        env.mock_all_auths();
+        let _h0 = client.append_custody_link(&courier, &facility, &workflow_id, &zero_hash);
+
+        // Second call passes a WRONG prev_hash — must fail CustodyChainBreak
+        let wrong_hash = make_bundle_hash(&env, 0xde);
+        client.append_custody_link(&facility, &courier, &workflow_id, &wrong_hash);
+    }
+
+    // ── AC: superseded proof queries — history retained ────────────────────
+
+    #[test]
+    fn test_superseded_proof_history_retained_and_queryable() {
+        let env = Env::default();
+        let (_, admin, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let bundle_hash_v1 = make_bundle_hash(&env, 0x11);
+        let bundle_hash_v2 = make_bundle_hash(&env, 0x22);
+
+        env.mock_all_auths();
+        let cid1 = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &bundle_hash_v1, &1u32,
+        );
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&facility, &cid1);
+
+        // Arbiter supersedes with corrected hash
+        env.mock_all_auths();
+        let cid2 = client.supersede_proof_commitment(
+            &admin, &cid1, &bundle_hash_v2, &String::from_str(&env, "temperature_correction"),
+        );
+
+        // Old commitment must be Superseded, not deleted.
+        let old_c = client.get_proof_commitment(&cid1);
+        assert_eq!(old_c.status, ProofCommitmentStatus::Superseded);
+        assert_eq!(old_c.superseded_by, Some(cid2));
+        assert!(old_c.supersede_reason.is_some());
+
+        // New commitment is PendingFacility (facility must re-attest).
+        let new_c = client.get_proof_commitment(&cid2);
+        assert_eq!(new_c.status, ProofCommitmentStatus::PendingFacility);
+        assert_eq!(new_c.bundle_hash, bundle_hash_v2);
+
+        // History contains both IDs.
+        let history = client.get_workflow_proof_history(&workflow_id);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.get(0).unwrap(), cid1);
+        assert_eq!(history.get(1).unwrap(), cid2);
+    }
+
+    // ── non-admin cannot supersede ────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #41)")]  // ArbiterApprovalRequired
+    fn test_non_admin_cannot_supersede_proof() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let bundle_hash = make_bundle_hash(&env, 0x33);
+
+        env.mock_all_auths();
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &bundle_hash, &1u32,
+        );
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&facility, &cid);
+
+        // Non-admin tries to supersede
+        let rogue = Address::generate(&env);
+        env.mock_all_auths();
+        client.supersede_proof_commitment(
+            &rogue, &cid, &make_bundle_hash(&env, 0x44),
+            &String::from_str(&env, "unauthorized"),
+        );
+    }
+
+    // ── duplicate active commitment rejected ──────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #33)")]  // ProofAlreadyCommitted
+    fn test_duplicate_active_commitment_for_workflow_fails() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        let bundle_hash = make_bundle_hash(&env, 0x55);
+
+        env.mock_all_auths();
+        client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &bundle_hash, &1u32,
+        );
+
+        // Second submission while first is PendingFacility — must fail
+        env.mock_all_auths();
+        client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &make_bundle_hash(&env, 0x66), &1u32,
+        );
+    }
+
+    // ── verify_inclusion on empty proof (single-leaf tree) ─────────────────
+
+    #[test]
+    fn test_verify_inclusion_single_leaf_tree() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        // A single-leaf tree: root == leaf_hash.
+        let leaf = make_bundle_hash(&env, 0xca);
+
+        env.mock_all_auths();
+        let workflow_id = make_workflow_id(&env);
+        let cid = client.submit_proof_commitment(
+            &courier, &facility, &workflow_id, &leaf, &1u32,
+        );
+        env.mock_all_auths();
+        client.confirm_proof_commitment(&facility, &cid);
+
+        let empty_proof: Vec<soroban_sdk::BytesN<32>> = vec![&env];
+        let result = client.verify_inclusion(&cid, &leaf, &empty_proof);
+        assert!(result, "Single-leaf tree with empty proof should match root");
+    }
+
+    // ── genesis link must use zero hash ───────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #43)")]  // CustodyChainBreak
+    fn test_genesis_link_non_zero_prev_hash_rejected() {
+        let env = Env::default();
+        let (_, _, courier, facility, client) = setup_proof_env(&env);
+
+        let workflow_id = make_workflow_id(&env);
+        // Non-zero prev_hash for genesis link must be rejected
+        let non_zero = make_bundle_hash(&env, 0x01);
+
+        env.mock_all_auths();
+        client.append_custody_link(&courier, &facility, &workflow_id, &non_zero);
+    }
+
+    // ── empty chain verifies as intact ───────────────────────────────────
+
+    #[test]
+    fn test_empty_custody_chain_verifies_intact() {
+        let env = Env::default();
+        let (_, _, _courier, _facility, client) = setup_proof_env(&env);
+
+        let workflow_id = String::from_str(&env, "no-links");
+        let valid = client.verify_custody_chain(&workflow_id);
+        assert!(valid);
     }
 }
