@@ -18,11 +18,14 @@ fn create_uninitialized_contract<'a>() -> (Env, DeliveryContractClient<'a>, Addr
 
 fn create_initialized_contract<'a>() -> (Env, DeliveryContractClient<'a>, Address, Address, Address)
 {
-    let (env, client, contract_id) = create_uninitialized_contract();
+    let env = Env::default();
+    env.mock_all_auths();
     let admin = Address::generate(&env);
     let request_contract = Address::generate(&env);
 
-    client.initialize(&admin, &request_contract);
+    // Pass constructor args at register time — atomic deploy+init.
+    let contract_id = env.register(DeliveryContract, (&admin, &request_contract));
+    let client = DeliveryContractClient::new(&env, &contract_id);
 
     (env, client, contract_id, admin, request_contract)
 }
@@ -73,12 +76,12 @@ fn test_initialize_emits_event() {
 
 #[test]
 fn test_initialize_cannot_run_twice() {
+    // create_uninitialized_contract registers with no args (legacy path).
+    // We then call initialize once to set admin, and the second call must fail.
     let (env, client, _contract_id) = create_uninitialized_contract();
     let admin = Address::generate(&env);
     let request_contract = Address::generate(&env);
-
     client.initialize(&admin, &request_contract);
-
     let result = client.try_initialize(&admin, &request_contract);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
@@ -167,12 +170,11 @@ fn test_submit_and_confirm_happy_path() {
 #[test]
 fn test_courier_alone_cannot_confirm() {
     let env = Env::default();
-    let contract_id = env.register(DeliveryContract, ());
-    let client = DeliveryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let request_contract = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &request_contract);
+    let contract_id = env.register(DeliveryContract, (&admin, &request_contract));
+    let client = DeliveryContractClient::new(&env, &contract_id);
 
     let courier = Address::generate(&env);
     let facility = Address::generate(&env);
@@ -237,12 +239,11 @@ fn test_courier_alone_cannot_confirm() {
 #[test]
 fn test_facility_alone_cannot_produce_confirmed_delivery() {
     let env = Env::default();
-    let contract_id = env.register(DeliveryContract, ());
-    let client = DeliveryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let request_contract = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &request_contract);
+    let contract_id = env.register(DeliveryContract, (&admin, &request_contract));
+    let client = DeliveryContractClient::new(&env, &contract_id);
 
     let courier = Address::generate(&env);
     let facility = Address::generate(&env);
@@ -479,12 +480,11 @@ fn test_confirm_unknown_delivery_fails() {
 #[test]
 fn test_confirmation_window_admin_config() {
     let env = Env::default();
-    let contract_id = env.register(DeliveryContract, ());
-    let client = DeliveryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let request_contract = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &request_contract);
+    let contract_id = env.register(DeliveryContract, (&admin, &request_contract));
+    let client = DeliveryContractClient::new(&env, &contract_id);
 
     assert_eq!(
         client.get_confirmation_window(),
@@ -538,12 +538,11 @@ fn test_confirmation_window_admin_config() {
 #[test]
 fn test_set_proof_requirements_requires_admin() {
     let env = Env::default();
-    let contract_id = env.register(DeliveryContract, ());
-    let client = DeliveryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let request_contract = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin, &request_contract);
+    let contract_id = env.register(DeliveryContract, (&admin, &request_contract));
+    let client = DeliveryContractClient::new(&env, &contract_id);
 
     let relaxed = ProofRequirements {
         requires_photo_proof: false,

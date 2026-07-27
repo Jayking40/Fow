@@ -1,0 +1,34 @@
+# deploy/local.toml — overrides for a local Stellar Quickstart container
+#
+# Usage:
+#   NETWORK=local ./scripts/deploy.sh
+#
+# Requires the quickstart container running on localhost:8000:
+#   docker run --rm -p 8000:8000 stellar/quickstart --local
+
+[env]
+network          = "local"
+rpc_url          = "http://localhost:8000/soroban/rpc"
+network_passphrase = "Standalone Network ; February 2017"
+# Key loaded from env var DEPLOYER_SECRET_KEY — never hard-coded here.
+source_identity  = "${DEPLOYER_SECRET_KEY}"
+
+[config.payments]
+# Shorter dispute timeout for local smoke tests (1 minute)
+dispute_timeout_secs = 60
+
+[config.temperature]
+default_min_celsius_x100 = 200
+default_max_celsius_x100 = 600
+
+# Seed blood-bank and hospital addresses for local smoke testing.
+# These are well-known quickstart test keypairs — safe to commit.
+[[roles]]
+contract = "inventory"
+fn       = "authorize_blood_bank"
+args     = { bank_id = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN" }
+
+[[roles]]
+contract = "requests"
+fn       = "authorize_hospital"
+args     = { hospital = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN" }

@@ -11,16 +11,19 @@ use soroban_sdk::{
 // IdentityContract tests
 // ---------------------------------------------------------------------------
 
+/// Helper: register + init in one shot using __constructor.
+fn make_identity_contract<'a>(env: &'a Env, admin: &Address) -> (Address, IdentityContractClient<'a>) {
+    let contract_id = env.register(IdentityContract, (admin,));
+    let client = IdentityContractClient::new(env, &contract_id);
+    (contract_id, client)
+}
+
 #[test]
 fn test_initialize_sets_admin_counter_and_admin_role() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     assert!(client.is_initialized());
     assert_eq!(client.get_admin(), admin.clone());
@@ -32,13 +35,8 @@ fn test_initialize_sets_admin_counter_and_admin_role() {
 fn test_initialize_emits_event() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-
-    client.initialize(&admin);
-
+    let _ = make_identity_contract(&env, &admin);
     assert_eq!(env.events().all().len(), 1);
 }
 
@@ -46,13 +44,8 @@ fn test_initialize_emits_event() {
 fn test_initialize_cannot_run_twice() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-
-    client.initialize(&admin);
-
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
     let result = client.try_initialize(&admin);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
@@ -61,10 +54,9 @@ fn test_initialize_cannot_run_twice() {
 fn test_initialize_guards_readers_before_init() {
     let env = Env::default();
     env.mock_all_auths();
-
+    // Register with no constructor args — simulates legacy deploy before initialize.
     let contract_id = env.register(IdentityContract, ());
     let client = IdentityContractClient::new(&env, &contract_id);
-
     assert_eq!(client.try_get_admin(), Err(Ok(Error::Unauthorized)));
     assert_eq!(client.try_get_org_counter(), Err(Ok(Error::Unauthorized)));
 }
@@ -73,7 +65,7 @@ fn test_initialize_guards_readers_before_init() {
 fn test_register_organization() {
     let env = Env::default();
     env.mock_all_auths();
-
+    // register_organization does not require admin init — uses open registration
     let contract_id = env.register(IdentityContract, ());
     let client = IdentityContractClient::new(&env, &contract_id);
 
@@ -268,12 +260,8 @@ fn test_get_verified_organizations() {
 fn test_verify_organization() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let name = String::from_str(&env, "City Blood Bank");
@@ -309,12 +297,8 @@ fn test_verify_organization() {
 fn test_verify_organization_not_admin() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let name = String::from_str(&env, "City Blood Bank");
@@ -340,12 +324,8 @@ fn test_verify_organization_not_admin() {
 fn test_verify_organization_already_verified() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let name = String::from_str(&env, "City Blood Bank");
@@ -373,12 +353,8 @@ fn test_verify_organization_already_verified() {
 fn test_verify_organization_not_found() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let fake_org = Address::generate(&env);
     let result = client.try_verify_organization(&admin, &fake_org);
@@ -389,12 +365,8 @@ fn test_verify_organization_not_found() {
 fn test_unverify_organization() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let name = String::from_str(&env, "City Blood Bank");
@@ -433,12 +405,8 @@ fn test_unverify_organization() {
 fn test_unverify_organization_already_unverified() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let name = String::from_str(&env, "City Blood Bank");
@@ -673,11 +641,8 @@ fn test_get_organization_rating() {
 fn test_award_badge() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let loc = BytesN::from_array(&env, &[0u8; 32]);
@@ -701,11 +666,8 @@ fn test_award_badge() {
 fn test_award_badge_duplicate_prevented() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let loc = BytesN::from_array(&env, &[0u8; 32]);
@@ -727,11 +689,8 @@ fn test_award_badge_duplicate_prevented() {
 fn test_revoke_badge() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let loc = BytesN::from_array(&env, &[0u8; 32]);
@@ -755,11 +714,8 @@ fn test_revoke_badge() {
 fn test_revoke_badge_not_found() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let owner = Address::generate(&env);
     let loc = BytesN::from_array(&env, &[0u8; 32]);
@@ -860,11 +816,8 @@ fn test_verify_delivery_org_not_found() {
 fn test_get_top_rated_organizations() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_identity_contract(&env, &admin);
 
     let loc = BytesN::from_array(&env, &[0u8; 32]);
 
@@ -906,15 +859,21 @@ fn test_get_top_rated_organizations() {
 // AccessControlContract tests (unchanged logic, updated role variants)
 // ---------------------------------------------------------------------------
 
+/// Helper: register + init AccessControlContract using __constructor.
+/// AccessControlContract.initialize panics if called twice, so we use
+/// the constructor path which is atomic.
+fn make_access_contract<'a>(env: &'a Env, admin: &Address) -> (Address, AccessControlContractClient<'a>) {
+    let contract_id = env.register(AccessControlContract, (admin,));
+    let client = AccessControlContractClient::new(env, &contract_id);
+    (contract_id, client)
+}
+
 #[test]
 fn test_grant_and_has_role() {
     let env = Env::default();
     env.mock_all_auths();
-
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -930,9 +889,7 @@ fn test_revoke_role() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -949,9 +906,7 @@ fn test_multiple_roles_single_entry() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -973,9 +928,7 @@ fn test_no_duplicate_roles() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -993,9 +946,7 @@ fn test_roles_sorted() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1018,9 +969,7 @@ fn test_role_expiration() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1051,9 +1000,7 @@ fn test_get_roles_empty() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
     let roles = client.get_roles(&address);
@@ -1066,9 +1013,7 @@ fn test_revoke_one_of_multiple_roles() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1092,9 +1037,7 @@ fn test_storage_benchmark_comparison() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let addr1 = Address::generate(&env);
     let addr2 = Address::generate(&env);
@@ -1148,9 +1091,7 @@ fn test_role_grant_metadata() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1175,9 +1116,7 @@ fn test_lazy_deletion_in_has_role() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1210,9 +1149,7 @@ fn test_lazy_deletion_preserves_other_roles() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1242,9 +1179,7 @@ fn test_cleanup_expired_roles_basic() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1277,9 +1212,7 @@ fn test_cleanup_expired_roles_removes_all_when_all_expired() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1310,9 +1243,7 @@ fn test_cleanup_expired_roles_no_roles() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
     let removed = client.cleanup_expired_roles(&address);
@@ -1325,9 +1256,7 @@ fn test_cleanup_expired_roles_none_expired() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     let address = Address::generate(&env);
 
@@ -1352,9 +1281,7 @@ fn test_already_initialized() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
     client.initialize(&admin);
 }
 
@@ -1386,9 +1313,7 @@ fn test_attack_self_grant_rider_to_admin_must_fail() {
     let admin = Address::generate(&env);
     let rider = Address::generate(&env);
 
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     // Give rider the Rider role legitimately.
     client.grant_role_with_expiry(&rider, &Role::Rider, &None);
@@ -1398,11 +1323,8 @@ fn test_attack_self_grant_rider_to_admin_must_fail() {
     // We do NOT mock admin auth — only rider auth is present.
     // The contract must reject because the stored admin != rider.
     env.set_auths(&[]);
-    // Re-mock only rider auth (not admin).
-    use soroban_sdk::testutils::AuthorizedFunction;
-    use soroban_sdk::testutils::MockAuth;
-    use soroban_sdk::testutils::MockAuthInvoke;
-    use soroban_sdk::IntoVal;
+    // Clear all auths — the contract reads stored admin and calls admin.require_auth(),
+    // which will fail because rider is not the admin.
 
     // Attempt: rider calls grant_role_with_expiry for themselves as Admin.
     // The contract reads the stored admin and calls admin.require_auth(),
@@ -1425,9 +1347,7 @@ fn test_attack_role_spoofing_hospital_calls_admin_function_must_fail() {
     let hospital = Address::generate(&env);
     let victim = Address::generate(&env);
 
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     // Hospital has Hospital role, not Admin.
     client.grant_role_with_expiry(&hospital, &Role::Hospital, &None);
@@ -1450,9 +1370,7 @@ fn test_attack_expired_role_reuse_must_fail() {
     let admin = Address::generate(&env);
     let blood_bank_admin = Address::generate(&env);
 
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     env.ledger().with_mut(|l| l.timestamp = 1_000);
 
@@ -1480,9 +1398,7 @@ fn test_attack_revoked_role_immediate_reuse_must_fail() {
     let admin = Address::generate(&env);
     let attacker = Address::generate(&env);
 
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     client.grant_role_with_expiry(&attacker, &Role::Donor, &None);
     assert!(client.has_role(&attacker, &Role::Donor));
@@ -1509,9 +1425,7 @@ fn test_attack_nomination_hijack_unauthorized_must_fail() {
     let attacker = Address::generate(&env);
     let fake_nominee = Address::generate(&env);
 
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     // Attacker (not admin) tries to grant Admin to fake_nominee.
     env.set_auths(&[]);
@@ -1535,9 +1449,7 @@ fn test_attack_scoped_role_cross_contamination_must_fail() {
     let bank_001 = Address::generate(&env);
     let bank_002 = Address::generate(&env);
 
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (_contract_id, client) = make_access_contract(&env, &admin);
 
     // bank_001 has BloodBank role.
     client.grant_role_with_expiry(&bank_001, &Role::BloodBank, &None);
@@ -1565,9 +1477,7 @@ fn test_attack_paused_contract_write_must_fail() {
     let authorized = Address::generate(&env);
     let target = Address::generate(&env);
 
-    let contract_id = env.register(AccessControlContract, ());
-    let client = AccessControlContractClient::new(&env, &contract_id);
-    client.initialize(&admin);
+    let (contract_id, client) = make_access_contract(&env, &admin);
 
     client.grant_role_with_expiry(&authorized, &Role::Hospital, &None);
 
@@ -1589,10 +1499,10 @@ fn test_attack_paused_contract_write_must_fail() {
 fn setup_identity<'a>() -> (Env, IdentityContractClient<'a>, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let cid = env.register(IdentityContract, ());
-    let client = IdentityContractClient::new(&env, &cid);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    // Use __constructor — atomic deploy+init.
+    let cid = env.register(IdentityContract, (&admin,));
+    let client = IdentityContractClient::new(&env, &cid);
     (env, client, admin)
 }
 

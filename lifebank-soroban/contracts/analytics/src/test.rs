@@ -14,10 +14,12 @@ fn setup<'a>() -> (Env, Address, AnalyticsContractClient<'a>) {
     let payments = Address::generate(&env);
     let reputation = Address::generate(&env);
 
-    let id = env.register(AnalyticsContract, ());
+    // Pass constructor args at register time — atomic deploy+init.
+    let id = env.register(
+        AnalyticsContract,
+        (&admin, &inventory, &requests, &payments, &reputation),
+    );
     let client = AnalyticsContractClient::new(&env, &id);
-
-    client.initialize(&admin, &inventory, &requests, &payments, &reputation);
 
     (env, admin, client)
 }
@@ -48,12 +50,24 @@ fn test_double_initialize_fails() {
     assert_eq!(result, Err(Ok(AnalyticsError::AlreadyInitialized)));
 }
 
+// ── Guard: double-init via legacy initialize() ────────────────────────────────
+
+/// `is_initialized` is always true after register because `__constructor`
+/// runs atomically at deploy time.  The legacy `initialize` must return
+/// `AlreadyInitialized` on a second call.
 #[test]
-fn test_is_initialized_false_before_init() {
-    let env = Env::default();
-    let id = env.register(AnalyticsContract, ());
-    let client = AnalyticsContractClient::new(&env, &id);
-    assert!(!client.is_initialized());
+fn test_is_initialized_true_after_register() {
+    let (_, _, client) = setup();
+    assert!(client.is_initialized());
+}
+
+#[test]
+fn test_legacy_initialize_fails_when_already_initialized() {
+    let (_, _, client) = setup();
+    let admin2 = Address::generate(&client.env);
+    let dummy = Address::generate(&client.env);
+    let result = client.try_initialize(&admin2, &dummy, &dummy, &dummy, &dummy);
+    assert_eq!(result, Err(Ok(AnalyticsError::AlreadyInitialized)));
 }
 
 // ── Lifetime counters start at zero ──────────────────────────────────────────
@@ -156,10 +170,19 @@ fn test_get_snapshot_returns_correct_period() {
 
 // ── Guard: not initialized ────────────────────────────────────────────────────
 
+/// With `__constructor`, a contract registered with `()` (no init args) is
+/// uninitialized.  The legacy `initialize` path sets storage; calling
+/// `record_donation` before that must still return `NotInitialized`.
+///
+/// This test uses the legacy `initialize` path (not the constructor) so
+/// we can create a pre-init snapshot.  In production the constructor makes
+/// this state structurally unreachable.
 #[test]
 fn test_record_donation_fails_when_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
+    // Register with no constructor args — simulates the legacy deploy path
+    // before `initialize` is called.
     let id = env.register(AnalyticsContract, ());
     let client = AnalyticsContractClient::new(&env, &id);
     let result = client.try_record_donation();

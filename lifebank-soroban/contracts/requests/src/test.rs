@@ -19,10 +19,13 @@ fn create_uninitialized_contract<'a>() -> (Env, RequestContractClient<'a>, Addre
 }
 
 fn create_initialized_contract<'a>() -> (Env, RequestContractClient<'a>, Address, Address, Address) {
-    let (env, client, contract_id) = create_uninitialized_contract();
+    let env = Env::default();
+    env.mock_all_auths();
     let admin = Address::generate(&env);
     let inventory_contract = Address::generate(&env);
-    client.initialize(&admin, &inventory_contract);
+    // Atomic deploy+init via __constructor.
+    let contract_id = env.register(RequestContract, (&admin, &inventory_contract));
+    let client = RequestContractClient::new(&env, &contract_id);
     (env, client, contract_id, admin, inventory_contract)
 }
 

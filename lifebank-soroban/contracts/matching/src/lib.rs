@@ -44,6 +44,27 @@ pub struct MatchingContract;
 impl MatchingContract {
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
+    /// Atomic constructor — deploy + init in a single transaction.
+    pub fn __constructor(
+        env: Env,
+        admin: Address,
+        inventory_contract: Address,
+        requests_contract: Address,
+    ) {
+        admin.require_auth();
+        if env.storage().instance().has(&DataKey::Initialized) {
+            panic!("already initialized");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::InventoryContract, &inventory_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::RequestsContract, &requests_contract);
+        env.storage().instance().set(&DataKey::Initialized, &true);
+    }
+
     pub fn initialize(
         env: Env,
         admin: Address,

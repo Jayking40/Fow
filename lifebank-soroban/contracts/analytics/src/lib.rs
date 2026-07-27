@@ -70,12 +70,87 @@ fn get_counter_i128(env: &Env, key: &DataKey) -> i128 {
 #[contract]
 pub struct AnalyticsContract;
 
+// ── Init helper (free function — cannot be inside #[contractimpl]) ────────────
+
+#[allow(clippy::too_many_arguments)]
+fn do_analytics_init(
+    env: &Env,
+    admin: Address,
+    inventory_contract: Address,
+    requests_contract: Address,
+    payments_contract: Address,
+    reputation_contract: Address,
+) {
+    let now = env.ledger().timestamp();
+    let config = AnalyticsConfig {
+        admin: admin.clone(),
+        inventory_contract,
+        requests_contract,
+        payments_contract,
+        reputation_contract,
+        reporting_period: ReportingPeriod {
+            period_type: PeriodType::Daily,
+            duration_secs: DAILY_SECS,
+            configured_at: now,
+        },
+        initialized_at: now,
+    };
+    env.storage().instance().set(&DataKey::Config, &config);
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalDonations, &0u64);
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalRequests, &0u64);
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalDeliveries, &0u64);
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalPaymentsReleased, &0u64);
+    env.storage().instance().set(&DataKey::TotalVolume, &0i128);
+    env.events().publish(
+        (
+            symbol_short!("anlytcs"),
+            symbol_short!("init"),
+            symbol_short!("v1"),
+        ),
+        admin,
+    );
+}
+
 #[contractimpl]
 impl AnalyticsContract {
-    /// Initialize the analytics contract.
+    /// Atomic constructor — deploy + init in a single transaction.
     ///
-    /// Links all domain contracts, sets the default reporting period (daily),
-    /// and zeroes all lifetime counters. Can only be called once.
+    /// soroban-sdk 22+ executes `__constructor` as part of the deploy call so
+    /// there is never an uninitialized window between deploy and setup.
+    #[allow(clippy::too_many_arguments)]
+    pub fn __constructor(
+        env: Env,
+        admin: Address,
+        inventory_contract: Address,
+        requests_contract: Address,
+        payments_contract: Address,
+        reputation_contract: Address,
+    ) {
+        admin.require_auth();
+        if env.storage().instance().has(&DataKey::Config) {
+            panic!("already initialized");
+        }
+        do_analytics_init(
+            &env,
+            admin,
+            inventory_contract,
+            requests_contract,
+            payments_contract,
+            reputation_contract,
+        );
+    }
+
+    /// Legacy initialize — kept for tooling compatibility.
+    /// Returns `AlreadyInitialized` if the constructor already ran.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -85,51 +160,17 @@ impl AnalyticsContract {
         reputation_contract: Address,
     ) -> Result<(), AnalyticsError> {
         admin.require_auth();
-
         if env.storage().instance().has(&DataKey::Config) {
             return Err(AnalyticsError::AlreadyInitialized);
         }
-
-        let now = env.ledger().timestamp();
-
-        let config = AnalyticsConfig {
-            admin: admin.clone(),
+        do_analytics_init(
+            &env,
+            admin,
             inventory_contract,
             requests_contract,
             payments_contract,
             reputation_contract,
-            reporting_period: ReportingPeriod {
-                period_type: PeriodType::Daily,
-                duration_secs: DAILY_SECS,
-                configured_at: now,
-            },
-            initialized_at: now,
-        };
-
-        env.storage().instance().set(&DataKey::Config, &config);
-
-        // Initialize lifetime counters to zero.
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalDonations, &0u64);
-        env.storage().instance().set(&DataKey::TotalRequests, &0u64);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalDeliveries, &0u64);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalPaymentsReleased, &0u64);
-        env.storage().instance().set(&DataKey::TotalVolume, &0i128);
-
-        env.events().publish(
-            (
-                symbol_short!("anlytcs"),
-                symbol_short!("init"),
-                symbol_short!("v1"),
-            ),
-            admin,
         );
-
         Ok(())
     }
 

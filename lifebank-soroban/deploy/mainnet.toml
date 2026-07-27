@@ -1,0 +1,47 @@
+# deploy/mainnet.toml — overrides for Stellar Mainnet
+#
+# MAINNET DEPLOY CHECKLIST
+# ────────────────────────
+# 1. All contracts audited and WASM hashes committed to deployments/testnet.json
+# 2. CI hash-verification job green on the testnet lockfile
+# 3. Governance proposal (#46) approved and vote period elapsed
+# 4. Deployer key held in HSM — NEVER export DEPLOYER_SECRET_KEY in plaintext
+# 5. Run with: NETWORK=mainnet ./scripts/deploy.sh
+#    The script will refuse to continue unless MAINNET_DEPLOY_CONFIRMED=yes
+#
+# Post-deploy:
+#   - Verify every contract on Stellar Expert
+#   - Transfer admin to multisig / governance contract
+#   - Run smoke suite: NETWORK=mainnet ./scripts/smoke-test.sh --readonly
+
+[env]
+network            = "mainnet"
+rpc_url            = "https://mainnet.stellar.validationcloud.io/v1/${VALIDATION_CLOUD_API_KEY}"
+network_passphrase = "Public Global Stellar Network ; September 2015"
+# Key loaded exclusively from HSM / CI secret — never printed or logged.
+source_identity    = "${DEPLOYER_SECRET_KEY}"
+# Safety interlock: deploy.sh checks this before touching mainnet
+require_confirmation = "MAINNET_DEPLOY_CONFIRMED"
+
+[config.payments]
+dispute_timeout_secs = 604800   # 7 days
+
+[config.temperature]
+default_min_celsius_x100 = 200
+default_max_celsius_x100 = 600
+
+# Mainnet role assignments are supplied exclusively via environment variables
+# so that addresses are never committed in plaintext.
+[[roles]]
+contract = "inventory"
+fn       = "authorize_blood_bank"
+args     = { bank_id = "${MAINNET_BLOOD_BANK}" }
+
+[[roles]]
+contract = "requests"
+fn       = "authorize_hospital"
+args     = { hospital = "${MAINNET_HOSPITAL}" }
+
+[smoke]
+# Canary workflow is skipped on mainnet by default — run manually if needed.
+run_canary = false

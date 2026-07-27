@@ -26,6 +26,15 @@ pub trait CoordinatorContractInterface {
 
 #[contractimpl]
 impl TemperatureContract {
+    /// Atomic constructor — deploy + init in a single transaction.
+    pub fn __constructor(env: Env, admin: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("already initialized");
+        }
+        storage::set_admin(&env, &admin);
+    }
+
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
 

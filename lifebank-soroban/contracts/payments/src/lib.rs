@@ -434,8 +434,26 @@ pub struct PaymentContract;
 
 #[contractimpl]
 impl PaymentContract {
-    /// Initialize the contract. Optionally provide the address of the requests
-    /// contract so that payment creation can validate request state.
+    /// Atomic constructor — deploy + init in a single transaction.
+    ///
+    /// Eliminates the front-running window that existed when deploy and
+    /// initialize were separate calls.  The legacy `initialize` entry-point
+    /// remains for tooling that is not yet constructor-aware but is a no-op
+    /// once the constructor has run.
+    pub fn __constructor(env: Env, admin: Address, requests_contract: Option<Address>) {
+        admin.require_auth();
+        if env.storage().instance().has(&ADMIN_KEY) {
+            panic!("already initialized");
+        }
+        env.storage().instance().set(&ADMIN_KEY, &admin);
+        if let Some(rc) = requests_contract {
+            env.storage().instance().set(&REQ_CONTRACT, &rc);
+        }
+    }
+
+    /// Legacy initialize — kept for tooling compatibility.
+    /// Returns `Unauthorized` (reuses the closest existing error code) if the
+    /// constructor already ran; otherwise performs first-time initialization.
     pub fn initialize(
         env: Env,
         admin: Address,

@@ -154,10 +154,11 @@ fn test_create_payment_rejects_duplicate_request_id() {
 
 #[test]
 fn test_create_escrow_rejects_duplicate_request_id() {
-    let (env, cid) = setup();
-    let client = PaymentContractClient::new(&env, &cid);
+    let env = Env::default();
+    env.mock_all_auths();
     let admin = Address::generate(&env);
-    client.initialize(&admin, &None);
+    let cid = env.register(PaymentContract, (&admin, &None::<Address>));
+    let client = PaymentContractClient::new(&env, &cid);
 
     let hospital = Address::generate(&env);
     let payee = Address::generate(&env);
@@ -530,10 +531,11 @@ fn test_create_pledge_rejects_zero_interval() {
 
 #[test]
 fn test_pause_blocks_create_payment() {
-    let (env, cid) = setup();
-    let client = PaymentContractClient::new(&env, &cid);
+    let env = Env::default();
+    env.mock_all_auths();
     let admin = Address::generate(&env);
-    client.initialize(&admin, &None);
+    let cid = env.register(PaymentContract, (&admin, &None::<Address>));
+    let client = PaymentContractClient::new(&env, &cid);
 
     client.pause(&admin);
     assert!(client.is_paused());
@@ -546,10 +548,11 @@ fn test_pause_blocks_create_payment() {
 
 #[test]
 fn test_pause_allows_get_payment() {
-    let (env, cid) = setup();
-    let client = PaymentContractClient::new(&env, &cid);
+    let env = Env::default();
+    env.mock_all_auths();
     let admin = Address::generate(&env);
-    client.initialize(&admin, &None);
+    let cid = env.register(PaymentContract, (&admin, &None::<Address>));
+    let client = PaymentContractClient::new(&env, &cid);
 
     let (id, _, _) = make_payment(&env, &client, 1, 1000);
     client.pause(&admin);
@@ -561,10 +564,11 @@ fn test_pause_allows_get_payment() {
 
 #[test]
 fn test_unpause_restores_payments() {
-    let (env, cid) = setup();
-    let client = PaymentContractClient::new(&env, &cid);
+    let env = Env::default();
+    env.mock_all_auths();
     let admin = Address::generate(&env);
-    client.initialize(&admin, &None);
+    let cid = env.register(PaymentContract, (&admin, &None::<Address>));
+    let client = PaymentContractClient::new(&env, &cid);
 
     client.pause(&admin);
     client.unpause(&admin);
@@ -577,10 +581,11 @@ fn test_unpause_restores_payments() {
 #[test]
 #[should_panic]
 fn test_non_admin_cannot_pause_payments() {
-    let (env, cid) = setup();
-    let client = PaymentContractClient::new(&env, &cid);
+    let env = Env::default();
+    env.mock_all_auths();
     let admin = Address::generate(&env);
-    client.initialize(&admin, &None);
+    let cid = env.register(PaymentContract, (&admin, &None::<Address>));
+    let client = PaymentContractClient::new(&env, &cid);
 
     let attacker = Address::generate(&env);
     client.pause(&attacker);
@@ -591,10 +596,9 @@ fn test_non_admin_cannot_pause_payments() {
 fn setup_with_admin() -> (Env, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(PaymentContract, ());
     let admin = Address::generate(&env);
-    let client = PaymentContractClient::new(&env, &contract_id);
-    client.initialize(&admin, &None);
+    // Atomic deploy+init via __constructor.
+    let contract_id = env.register(PaymentContract, (&admin, &None::<Address>));
     (env, contract_id, admin)
 }
 

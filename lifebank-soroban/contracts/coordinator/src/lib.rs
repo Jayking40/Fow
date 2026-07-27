@@ -169,6 +169,54 @@ pub struct CoordinatorContract;
 
 #[contractimpl]
 impl CoordinatorContract {
+    /// Atomic constructor — deploy + init in a single transaction.
+    ///
+    /// soroban-sdk 22+ executes `__constructor` as part of the deploy call,
+    /// eliminating the window between deploy and initialize during which any
+    /// caller could front-run and claim admin by calling `initialize` first.
+    ///
+    /// The separate `initialize` entry-point is kept with an already-initialized
+    /// guard for tooling compatibility, but is a no-op if the constructor ran.
+    #[allow(clippy::too_many_arguments)]
+    pub fn __constructor(
+        env: Env,
+        admin: Address,
+        request_contract: Address,
+        inventory_contract: Address,
+        payment_contract: Address,
+    ) {
+        admin.require_auth();
+        // Constructor must never be callable more than once.  The deployer
+        // guarantees this for the first call; we guard anyway so a mistaken
+        // direct invocation after deploy is an explicit error rather than a
+        // silent state corruption.
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("already initialized");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::RequestContract, &request_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::InventoryContract, &inventory_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentContract, &payment_contract);
+        env.events().publish(
+            (
+                symbol_short!("coord"),
+                symbol_short!("init"),
+                symbol_short!("v1"),
+            ),
+            admin,
+        );
+    }
+
+    /// Legacy initialize — kept for tooling compatibility.
+    /// Returns `AlreadyInitialized` if the constructor already ran (the
+    /// normal case); otherwise performs first-time initialization so the
+    /// contract can be used without a constructor-aware deployer.
     pub fn initialize(
         env: Env,
         admin: Address,

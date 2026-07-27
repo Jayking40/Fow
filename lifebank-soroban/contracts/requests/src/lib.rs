@@ -34,6 +34,25 @@ pub struct RequestContract;
 
 #[contractimpl]
 impl RequestContract {
+    /// Atomic constructor — deploy + init in a single transaction.
+    pub fn __constructor(
+        env: Env,
+        admin: Address,
+        inventory_contract: Address,
+    ) {
+        admin.require_auth();
+        if storage::is_initialized(&env) {
+            panic!("already initialized");
+        }
+        storage::set_admin(&env, &admin);
+        storage::set_inventory_contract(&env, &inventory_contract);
+        storage::set_request_counter(&env, 0);
+        storage::set_metadata(&env, &storage::default_metadata(&env));
+        storage::authorize_hospital(&env, &admin);
+        storage::set_initialized(&env);
+        events::emit_initialized(&env, &admin, &inventory_contract);
+    }
+
     pub fn initialize(
         env: Env,
         admin: Address,
