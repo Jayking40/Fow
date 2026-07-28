@@ -1,6 +1,14 @@
-import { Test, TestingModule } from '@nestjs/testing';
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument */
 import { JwtService } from '@nestjs/jwt';
+import { Test, TestingModule } from '@nestjs/testing';
 
+import { JwtKeyService } from '../auth/jwt-key.service';
+import { BackpressureQueueService } from '../websockets/backpressure-queue.service';
+import { RoomAuthorizationService } from '../websockets/room-authorization.service';
+import { RoomEventBusService } from '../websockets/room-event-bus.service';
+import { WsRateLimiterService } from '../websockets/ws-rate-limiter.service';
+
+import { LocationCoalescerService } from './location-coalescer.service';
 import { TrackingGateway } from './tracking.gateway';
 
 const makeSocket = (id = 'socket-1') => ({
@@ -22,14 +30,46 @@ const makeServer = () => ({
 describe('TrackingGateway — authorization & schema validation', () => {
   let gateway: TrackingGateway;
   let jwtService: jest.Mocked<Pick<JwtService, 'verifyAsync'>>;
+  let roomEventBus: { publish: jest.Mock; replay: jest.Mock };
+  let roomAuthorizationService: { evaluate: jest.Mock; auditDenied: jest.Mock };
 
   beforeEach(async () => {
     jwtService = { verifyAsync: jest.fn() };
+    roomEventBus = {
+      publish: jest
+        .fn()
+        .mockResolvedValue({ seq: 1, ts: new Date().toISOString() }),
+      replay: jest
+        .fn()
+        .mockResolvedValue({ resyncRequired: false, events: [] }),
+    };
+    roomAuthorizationService = {
+      evaluate: jest.fn().mockReturnValue({ allowed: true }),
+      auditDenied: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TrackingGateway,
         { provide: JwtService, useValue: jwtService },
+        {
+          provide: JwtKeyService,
+          useValue: { resolveSecret: jest.fn().mockReturnValue('secret') },
+        },
+        {
+          provide: RoomAuthorizationService,
+          useValue: roomAuthorizationService,
+        },
+        { provide: RoomEventBusService, useValue: roomEventBus },
+        {
+          provide: BackpressureQueueService,
+          useValue: { enqueue: jest.fn(), release: jest.fn() },
+        },
+        {
+          provide: WsRateLimiterService,
+          useValue: { allow: jest.fn().mockResolvedValue(true) },
+        },
+        { provide: LocationCoalescerService, useValue: { record: jest.fn() } },
       ],
     }).compile();
 
@@ -42,7 +82,7 @@ describe('TrackingGateway — authorization & schema validation', () => {
 
   it('rejects connection without token', async () => {
     const socket = makeSocket();
-    socket.handshake.auth = {};
+    (socket.handshake as any).auth = {};
     (socket.handshake as any).query = {};
     await gateway.handleConnection(socket as any);
     expect(socket.disconnect).toHaveBeenCalledWith(true);
@@ -53,15 +93,21 @@ describe('TrackingGateway — authorization & schema validation', () => {
     const socket = makeSocket();
     await gateway.handleConnection(socket as any);
     expect(socket.disconnect).toHaveBeenCalledWith(true);
-    expect(socket.emit).toHaveBeenCalledWith('error', { reason: 'Invalid or expired token' });
+    expect(socket.emit).toHaveBeenCalledWith('error', {
+      reason: 'Invalid or expired token',
+    });
   });
 
   it('accepts valid token and stores context', async () => {
     jwtService.verifyAsync.mockResolvedValue({ sub: 'user-1', role: 'user' });
     const socket = makeSocket();
     await gateway.handleConnection(socket as any);
-    expect(socket.emit).toHaveBeenCalledWith('connected', expect.objectContaining({ userId: 'user-1' }));
+    expect(socket.emit).toHaveBeenCalledWith(
+      'connected',
+      expect.objectContaining({ userId: 'user-1' }),
+    );
     expect((gateway as any).connectedClients.has('socket-1')).toBe(true);
+    gateway.handleDisconnect(socket as any);
   });
 
   // ---------------------------------------------------------------------------
@@ -73,113 +119,152 @@ describe('TrackingGateway — authorization & schema validation', () => {
       userId: 'user-1',
       role,
       riderId,
+      orgId: null,
       rooms: new Set(),
     });
   };
 
-  it('allows any authenticated user to subscribe to a delivery', () => {
+  it('allows any authenticated user to subscribe to a delivery', async () => {
     const socket = makeSocket();
     seedClient('socket-1', 'user');
-    gateway.handleDeliverySubscribe(socket as any, { deliveryId: 'del-1' });
+    await gateway.handleDeliverySubscribe(socket as any, {
+      deliveryId: 'del-1',
+    });
     expect(socket.join).toHaveBeenCalledWith('delivery:del-1');
   });
 
-  it('rejects subscribe for unauthenticated socket', () => {
+  it('rejects subscribe for unauthenticated socket', async () => {
     const socket = makeSocket();
     // no client context seeded
-    gateway.handleDeliverySubscribe(socket as any, { deliveryId: 'del-1' });
+    await gateway.handleDeliverySubscribe(socket as any, {
+      deliveryId: 'del-1',
+    });
     expect(socket.join).not.toHaveBeenCalled();
-    expect(socket.emit).toHaveBeenCalledWith('error', { reason: 'Client not authenticated' });
+    expect(socket.emit).toHaveBeenCalledWith('error', {
+      reason: 'Client not authenticated',
+    });
   });
 
-  it('rejects subscribe without deliveryId', () => {
+  it('rejects subscribe without deliveryId', async () => {
     const socket = makeSocket();
     seedClient('socket-1', 'user');
-    gateway.handleDeliverySubscribe(socket as any, {} as any);
+    await gateway.handleDeliverySubscribe(socket as any, {} as any);
     expect(socket.join).not.toHaveBeenCalled();
+  });
+
+  it('rejects subscribe when room-authorization denies the join and audits it', async () => {
+    roomAuthorizationService.evaluate.mockReturnValue({
+      allowed: false,
+      reason: 'blocked',
+    });
+    const socket = makeSocket();
+    seedClient('socket-1', 'user');
+    await gateway.handleDeliverySubscribe(socket as any, {
+      deliveryId: 'del-1',
+    });
+    expect(socket.join).not.toHaveBeenCalled();
+    expect(roomAuthorizationService.auditDenied).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'user-1' }),
+      'delivery:del-1',
+      'socket-1',
+      'blocked',
+    );
   });
 
   // ---------------------------------------------------------------------------
   // Publish authorization — rider.location
   // ---------------------------------------------------------------------------
 
-  it('allows assigned rider to publish location', () => {
+  it('allows assigned rider to publish location', async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'rider', 'rider-1');
 
-    gateway.handleRiderLocation(socket as any, {
+    await gateway.handleRiderLocation(socket as any, {
       riderId: 'rider-1',
       deliveryId: 'del-1',
       latitude: 6.45,
       longitude: 3.4,
     });
 
-    expect(server.to).toHaveBeenCalledWith('delivery:del-1');
-    expect(server.emit).toHaveBeenCalledWith('location.update', expect.objectContaining({ riderId: 'rider-1' }));
+    const locationCoalescer = (gateway as any).locationCoalescer;
+    expect(locationCoalescer.record).toHaveBeenCalledWith(
+      server,
+      'delivery:del-1',
+      'rider-1',
+      expect.objectContaining({ riderId: 'rider-1' }),
+    );
   });
 
-  it('blocks a rider from publishing location for another rider\'s delivery', () => {
+  it("blocks a rider from publishing location for another rider's delivery", async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'rider', 'rider-2'); // different rider
 
-    gateway.handleRiderLocation(socket as any, {
+    await gateway.handleRiderLocation(socket as any, {
       riderId: 'rider-1',
       deliveryId: 'del-1',
       latitude: 6.45,
       longitude: 3.4,
     });
 
-    expect(server.to).not.toHaveBeenCalled();
-    expect(socket.emit).toHaveBeenCalledWith('error', expect.objectContaining({ reason: expect.stringContaining('Not authorized') }));
+    const locationCoalescer = (gateway as any).locationCoalescer;
+    expect(locationCoalescer.record).not.toHaveBeenCalled();
+    expect(socket.emit).toHaveBeenCalledWith(
+      'error',
+      expect.objectContaining({
+        reason: expect.stringContaining('Not authorized'),
+      }),
+    );
   });
 
-  it('blocks regular user from publishing location', () => {
+  it('blocks regular user from publishing location', async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'user');
 
-    gateway.handleRiderLocation(socket as any, {
+    await gateway.handleRiderLocation(socket as any, {
       riderId: 'rider-1',
       deliveryId: 'del-1',
       latitude: 6.45,
       longitude: 3.4,
     });
 
-    expect(server.to).not.toHaveBeenCalled();
+    const locationCoalescer = (gateway as any).locationCoalescer;
+    expect(locationCoalescer.record).not.toHaveBeenCalled();
   });
 
-  it('allows admin to publish location', () => {
+  it('allows admin to publish location', async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'admin');
 
-    gateway.handleRiderLocation(socket as any, {
+    await gateway.handleRiderLocation(socket as any, {
       riderId: 'rider-1',
       deliveryId: 'del-1',
       latitude: 6.45,
       longitude: 3.4,
     });
 
-    expect(server.to).toHaveBeenCalledWith('delivery:del-1');
+    const locationCoalescer = (gateway as any).locationCoalescer;
+    expect(locationCoalescer.record).toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------------
   // Schema / coordinate validation
   // ---------------------------------------------------------------------------
 
-  it('rejects out-of-range latitude', () => {
+  it('rejects out-of-range latitude', async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'rider', 'rider-1');
 
-    gateway.handleRiderLocation(socket as any, {
+    await gateway.handleRiderLocation(socket as any, {
       riderId: 'rider-1',
       deliveryId: 'del-1',
       latitude: 999,
@@ -187,57 +272,71 @@ describe('TrackingGateway — authorization & schema validation', () => {
     });
 
     expect(server.to).not.toHaveBeenCalled();
-    expect(socket.emit).toHaveBeenCalledWith('error', { reason: 'Invalid coordinates' });
+    expect(socket.emit).toHaveBeenCalledWith('error', {
+      reason: 'Invalid coordinates',
+    });
   });
 
-  it('rejects invalid delivery status enum', () => {
+  it('rejects invalid delivery status enum', async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'rider', 'rider-1');
 
-    gateway.handleDeliveryStatus(socket as any, {
+    await gateway.handleDeliveryStatus(socket as any, {
       deliveryId: 'del-1',
       status: 'HACKED_STATUS',
       riderId: 'rider-1',
     });
 
-    expect(server.to).not.toHaveBeenCalled();
-    expect(socket.emit).toHaveBeenCalledWith('error', expect.objectContaining({ reason: expect.stringContaining('Invalid status') }));
+    expect(roomEventBus.publish).not.toHaveBeenCalled();
+    expect(socket.emit).toHaveBeenCalledWith(
+      'error',
+      expect.objectContaining({
+        reason: expect.stringContaining('Invalid status'),
+      }),
+    );
   });
 
-  it('rejects negative estimatedMinutes in ETA', () => {
+  it('rejects negative estimatedMinutes in ETA', async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'admin');
 
-    gateway.handleETABroadcast(socket as any, {
+    await gateway.handleETABroadcast(socket as any, {
       deliveryId: 'del-1',
       estimatedMinutes: -5,
     });
 
-    expect(server.to).not.toHaveBeenCalled();
-    expect(socket.emit).toHaveBeenCalledWith('error', { reason: 'Invalid estimatedMinutes' });
+    expect(roomEventBus.publish).not.toHaveBeenCalled();
+    expect(socket.emit).toHaveBeenCalledWith('error', {
+      reason: 'Invalid estimatedMinutes',
+    });
   });
 
   // ---------------------------------------------------------------------------
   // Cross-delivery subscription scope
   // ---------------------------------------------------------------------------
 
-  it('user cannot publish status for a delivery they do not own', () => {
+  it('user cannot publish status for a delivery they do not own', async () => {
     const socket = makeSocket();
     const server = makeServer();
     (gateway as any).server = server;
     seedClient('socket-1', 'user'); // plain user, not a rider
 
-    gateway.handleDeliveryStatus(socket as any, {
+    await gateway.handleDeliveryStatus(socket as any, {
       deliveryId: 'del-99',
       status: 'in_transit',
       riderId: 'rider-99',
     });
 
-    expect(server.to).not.toHaveBeenCalled();
-    expect(socket.emit).toHaveBeenCalledWith('error', expect.objectContaining({ reason: expect.stringContaining('Not authorized') }));
+    expect(roomEventBus.publish).not.toHaveBeenCalled();
+    expect(socket.emit).toHaveBeenCalledWith(
+      'error',
+      expect.objectContaining({
+        reason: expect.stringContaining('Not authorized'),
+      }),
+    );
   });
 });

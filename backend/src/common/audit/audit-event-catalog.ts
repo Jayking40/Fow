@@ -538,6 +538,18 @@ export const AUDIT_EVENT_CATALOG: Record<string, AuditEventDefinition> = {
     requiresBeforeAfter: true,
     retentionYears: 10,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // WebSocket Gateway Events
+  // ═══════════════════════════════════════════════════════════════════════════
+  'ws.room.join.denied': {
+    action: 'ws.room.join.denied',
+    category: AuditCategory.AUTHORIZATION,
+    severity: AuditSeverity.MEDIUM,
+    description: 'Unauthorized WebSocket room join attempt rejected',
+    requiresBeforeAfter: false,
+    retentionYears: 5,
+  },
 };
 
 /**

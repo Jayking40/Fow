@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 
+import { WebsocketsModule } from '../websockets/websockets.module';
+
+import { LocationCoalescerService } from './location-coalescer.service';
 import { TrackingGateway } from './tracking.gateway';
 
 @Module({
@@ -15,8 +18,9 @@ import { TrackingGateway } from './tracking.gateway';
         signOptions: { expiresIn: '1d' },
       }),
     }),
+    WebsocketsModule,
   ],
-  providers: [TrackingGateway],
+  providers: [TrackingGateway, LocationCoalescerService],
   exports: [TrackingGateway],
 })
 export class TrackingModule {}
