@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, Vec,
 };
 
 // ── Constants (all arithmetic is integer, scaled ×100 for two decimal places) ──
@@ -204,8 +204,7 @@ fn do_reputation_init(env: &Env, admin: Address) {
             min_interactions_for_badge: DEFAULT_BADGE_MIN_INTERACTIONS,
         },
     );
-    env.events()
-        .publish((symbol_short!("init"), symbol_short!("v1")), admin);
+    events::emit_initialized(env, &admin);
 }
 
 #[contract]
@@ -379,6 +378,8 @@ impl ReputationContract {
             .persistent()
             .set(&DataKey::Input(entity_id), &input);
 
+        events::emit_rating_submitted(&env, entity_id, score, timestamp);
+
         let result = Self::calculate_reputation(env.clone(), entity_id)?;
         Ok(result)
     }
@@ -419,6 +420,8 @@ impl ReputationContract {
             .persistent()
             .set(&DataKey::Input(entity_id), &input);
 
+        events::emit_assignment_recorded(&env, entity_id, completed, response_secs, timestamp);
+
         Self::calculate_reputation(env, entity_id)
     }
 
@@ -436,6 +439,8 @@ impl ReputationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Input(entity_id), &input);
+
+        events::emit_fraud_flagged(&env, entity_id, input.fraud_flags, timestamp);
 
         Self::calculate_reputation(env, entity_id)
     }
@@ -461,10 +466,11 @@ impl ReputationContract {
             .ok_or(Error::EntityNotFound)?;
 
         let id = input.penalties.len();
+        let applied_at = env.ledger().timestamp();
         input.penalties.push_back(PenaltyRecord {
             id,
             violation_type: violation,
-            timestamp: env.ledger().timestamp(),
+            timestamp: applied_at,
             is_resolved: false,
             is_appealed: false,
         });
@@ -472,6 +478,8 @@ impl ReputationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Input(entity_id), &input);
+
+        events::emit_penalty_applied(&env, entity_id, id, violation, &admin, applied_at);
 
         Self::calculate_reputation(env, entity_id)
     }
@@ -503,6 +511,9 @@ impl ReputationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Input(entity_id), &input);
+
+        events::emit_penalty_appealed(&env, entity_id, penalty_id);
+
         Ok(())
     }
 
@@ -547,6 +558,9 @@ impl ReputationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Input(entity_id), &input);
+
+        events::emit_penalty_resolved(&env, entity_id, penalty_id, should_remove, &admin);
+
         Self::calculate_reputation(env, entity_id)
     }
 
@@ -623,13 +637,18 @@ impl ReputationContract {
             .persistent()
             .set(&DataKey::Score(entity_id), &result);
 
-        env.events().publish(
-            (
-                symbol_short!("rep"),
-                symbol_short!("updated"),
-                symbol_short!("v1"),
-            ),
-            (entity_id, final_score),
+        events::emit_score_updated(
+            &env,
+            entity_id,
+            final_score,
+            rating_component,
+            completion_component,
+            response_component,
+            consistency_bonus,
+            fraud_penalty,
+            decay_applied,
+            penalty_points,
+            now,
         );
 
         Ok(result)
@@ -863,6 +882,7 @@ impl ReputationContract {
     }
 }
 
+mod events;
 mod test;
 
 // ── Upgradeability & versioned storage schema (#31) ───────────────────────────

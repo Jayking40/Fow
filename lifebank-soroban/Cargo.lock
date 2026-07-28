@@ -18,6 +18,7 @@ dependencies = [
 name = "analytics-contract"
 version = "0.0.0"
 dependencies = [
+ "lifebank-interfaces",
  "soroban-sdk",
 ]
 
@@ -265,6 +266,7 @@ version = "0.0.0"
 dependencies = [
  "delivery-contract",
  "inventory-contract",
+ "lifebank-interfaces",
  "payment-contract",
  "request-contract",
  "soroban-sdk",
@@ -441,6 +443,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 name = "delivery-contract"
 version = "0.0.0"
 dependencies = [
+ "lifebank-interfaces",
  "soroban-sdk",
 ]
 
@@ -772,6 +775,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 name = "identity-contract"
 version = "0.0.0"
 dependencies = [
+ "lifebank-interfaces",
  "soroban-sdk",
 ]
 
@@ -870,6 +874,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "lifebank-interfaces"
+version = "0.0.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,6 +902,7 @@ name = "matching-contract"
 version = "0.0.0"
 dependencies = [
  "inventory-contract",
+ "lifebank-interfaces",
  "request-contract",
  "soroban-sdk",
 ]
@@ -974,6 +986,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "payment-contract"
 version = "0.0.0"
 dependencies = [
+ "lifebank-interfaces",
  "soroban-sdk",
 ]
 
@@ -1093,6 +1106,7 @@ dependencies = [
 name = "reputation-contract"
 version = "0.0.0"
 dependencies = [
+ "lifebank-interfaces",
  "soroban-sdk",
 ]
 
@@ -1597,6 +1611,7 @@ dependencies = [
 name = "temperature-contract"
 version = "0.0.0"
 dependencies = [
+ "lifebank-interfaces",
  "soroban-sdk",
 ]
 

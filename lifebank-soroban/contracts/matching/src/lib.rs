@@ -1,6 +1,7 @@
 #![no_std]
 
 mod error;
+mod events;
 mod matching;
 mod types;
 
@@ -63,6 +64,8 @@ impl MatchingContract {
             .instance()
             .set(&DataKey::RequestsContract, &requests_contract);
         env.storage().instance().set(&DataKey::Initialized, &true);
+
+        events::emit_initialized(&env, &admin, &inventory_contract, &requests_contract);
     }
 
     pub fn initialize(

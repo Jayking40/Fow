@@ -1,6 +1,7 @@
 #![no_std]
 
 mod error;
+mod events;
 mod types;
 
 #[cfg(test)]
@@ -9,7 +10,7 @@ mod test;
 pub use error::AnalyticsError;
 pub use types::{AnalyticsConfig, DataKey, MetricsSnapshot, PeriodType, ReportingPeriod};
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, Address, Env};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

@@ -33,6 +33,15 @@ describe('contract event schema versioning', () => {
     ).toBe(CONTRACT_EVENT_SCHEMA_VERSION);
   });
 
+  it('decodes the EVENTS.md envelope, where the trailing topic segment is a raw u32', () => {
+    expect(
+      getContractEventSchemaVersion({
+        topics: ['inventory', 'blood_registered', 1],
+        eventData: {},
+      }),
+    ).toBe(CONTRACT_EVENT_SCHEMA_VERSION);
+  });
+
   it('rejects unknown future versions instead of silently decoding them', () => {
     expect(() =>
       assertSupportedContractEventSchemaVersion({
