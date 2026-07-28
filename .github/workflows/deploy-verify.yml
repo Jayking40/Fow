@@ -58,6 +58,18 @@ jobs:
 
       - name: Run unit tests
         run: cargo test --all
+  # ── Job 1b: Event catalog coverage ────────────────────────────────────────
+  event-catalog:
+    name: Event Catalog Coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lifebank-soroban
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Diff EVENTS.md against emitted events
+        run: bash scripts/check-event-catalog.sh
   # ── Job 2: Reproducible build ─────────────────────────────────────────────
   build:
     name: Reproducible Build

@@ -1,8 +1,27 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, TryFromVal, Val};
 
 use super::{AnalyticsContract, AnalyticsContractClient, AnalyticsError, PeriodType};
+use lifebank_interfaces::events::analytics as ev;
+
+/// Decode the `(contract_domain, event_name, schema_version)` topic triple
+/// from the most recently published event.
+fn last_event_topics(env: &Env) -> (Symbol, Symbol, u32) {
+    let all = env.events().all();
+    let (_, topics, _) = all.last().unwrap();
+    let domain: Symbol = TryFromVal::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+    let name: Symbol = TryFromVal::try_from_val(env, &topics.get(1).unwrap()).unwrap();
+    let version: u32 = TryFromVal::try_from_val(env, &topics.get(2).unwrap()).unwrap();
+    (domain, name, version)
+}
+
+/// Decode the data payload of the most recently published event as `T`.
+fn last_event_payload<T: TryFromVal<Env, Val>>(env: &Env) -> T {
+    let all = env.events().all();
+    let (_, _, data) = all.last().unwrap();
+    T::try_from_val(env, &data).unwrap()
+}
 
 fn setup<'a>() -> (Env, Address, AnalyticsContractClient<'a>) {
     let env = Env::default();

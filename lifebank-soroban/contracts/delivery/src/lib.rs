@@ -1,8 +1,10 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env,
 };
+
+mod events;
 
 const DEFAULT_MIN_TEMPERATURE_C: i32 = 2;
 const DEFAULT_MAX_TEMPERATURE_C: i32 = 6;
@@ -102,10 +104,7 @@ fn do_delivery_init(env: &Env, admin: Address, request_contract: Address) {
         &DEFAULT_CONFIRMATION_WINDOW_LEDGERS,
     );
 
-    env.events().publish(
-        (symbol_short!("init"), symbol_short!("v1")),
-        (admin, request_contract),
-    );
+    events::emit_initialized(env, &admin, &request_contract);
 }
 
 #[contractimpl]

@@ -758,10 +758,7 @@ impl CoordinatorContract {
             executable_at: now + UPGRADE_TIMELOCK_SECS,
         };
         env.storage().instance().set(&PENDING_UPGRADE_KEY, &pending);
-        env.events().publish(
-            (symbol_short!("upgrade"), symbol_short!("proposed")),
-            pending.executable_at,
-        );
+        events::emit_upgrade_proposed(&env, pending.executable_at);
         Ok(pending.executable_at)
     }
 
@@ -777,8 +774,7 @@ impl CoordinatorContract {
             return Err(CoordinatorError::NoPendingUpgrade);
         }
         env.storage().instance().remove(&PENDING_UPGRADE_KEY);
-        env.events()
-            .publish((symbol_short!("upgrade"), symbol_short!("canceled")), ());
+        events::emit_upgrade_canceled(&env);
         Ok(())
     }
 

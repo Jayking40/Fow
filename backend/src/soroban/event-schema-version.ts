@@ -52,6 +52,13 @@ export function assertSupportedContractEventSchemaVersion(
 }
 
 function parseTopicVersion(topic: unknown): number | undefined {
+  // EVENTS.md envelope (lifebank-soroban contracts, schema catalog v1+):
+  // the trailing topic segment is a raw u32, decoded here as a plain number.
+  if (typeof topic === 'number' && Number.isInteger(topic)) {
+    return topic;
+  }
+
+  // Legacy convention: trailing topic segment was a `vN` symbol.
   if (typeof topic !== 'string') {
     return undefined;
   }
