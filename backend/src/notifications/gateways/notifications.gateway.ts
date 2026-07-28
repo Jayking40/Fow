@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -7,8 +8,15 @@ import {
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
 
-import { OnEvent } from '@nestjs/event-emitter';
 import { Server, Socket } from 'socket.io';
+
+import { JwtKeyService } from '../../auth/jwt-key.service';
+import { RoomAuthorizationService } from '../../websockets/room-authorization.service';
+import { RoomEventBusService } from '../../websockets/room-event-bus.service';
+import {
+  createWsAuthMiddleware,
+  type WsAuthenticatedUser,
+} from '../../websockets/ws-jwt-auth';
 
 @WebSocketGateway({
   namespace: '/notifications',
@@ -25,20 +33,54 @@ export class NotificationsGateway
 
   private readonly logger = new Logger(NotificationsGateway.name);
 
-  afterInit(_server: Server): void {
+  constructor(
+    private readonly jwtKeyService: JwtKeyService,
+    private readonly roomAuthorizationService: RoomAuthorizationService,
+    private readonly roomEventBus: RoomEventBusService,
+  ) {}
+
+  afterInit(server: Server): void {
+    // Reject the handshake before 'connection' fires for unauthenticated sockets —
+    // previously this namespace trusted a client-supplied recipientId with no auth
+    // at all, letting any socket read anyone else's notifications.
+    server.use(createWsAuthMiddleware(this.jwtKeyService));
     this.logger.log('NotificationsGateway WebSocket server initialized');
   }
 
   handleConnection(client: Socket): void {
-    const recipientId = client.handshake.query.recipientId as string;
-    if (recipientId) {
-      client.join(`recipient_${recipientId}`);
-      this.logger.log(
-        `Client ${client.id} connected and joined room recipient_${recipientId}`,
-      );
-    } else {
-      this.logger.log(`Client ${client.id} connected without recipientId`);
+    const user = (client.data as Record<string, unknown>).user as
+      | WsAuthenticatedUser
+      | undefined;
+
+    if (!user) {
+      // Safety net: the handshake middleware should already have refused
+      // unauthenticated sockets before this handler runs.
+      client.disconnect(true);
+      return;
     }
+
+    const requestedRecipientId =
+      (client.handshake.query?.recipientId as string | undefined) ??
+      user.userId;
+    const room = `recipient:${requestedRecipientId}`;
+
+    const decision = this.roomAuthorizationService.evaluate(user, room, 0);
+    if (!decision.allowed) {
+      void this.roomAuthorizationService.auditDenied(
+        user,
+        room,
+        client.id,
+        decision.reason,
+      );
+      client.emit('error', {
+        reason: decision.reason ?? 'Not authorized to join room',
+      });
+      client.disconnect(true);
+      return;
+    }
+
+    client.join(room);
+    this.logger.log(`Client ${client.id} connected and joined room ${room}`);
   }
 
   handleDisconnect(client: Socket): void {
@@ -49,13 +91,15 @@ export class NotificationsGateway
    * Listen to Order status updates and notify recipient.
    */
   @OnEvent('order.status.updated')
-  handleOrderStatusUpdated(payload: any) {
-    this.logger.log(`WS Notification [Order]: ${payload.orderId} -> ${payload.newStatus}`);
+  handleOrderStatusUpdated(payload: { orderId: string; newStatus: string }) {
+    this.logger.log(
+      `WS Notification [Order]: ${payload.orderId} -> ${payload.newStatus}`,
+    );
     this.server.emit('blood-request.status-changed', {
-       type: 'ORDER',
-       id: payload.orderId,
-       newStatus: payload.newStatus,
-       timestamp: new Date()
+      type: 'ORDER',
+      id: payload.orderId,
+      newStatus: payload.newStatus,
+      timestamp: new Date(),
     });
   }
 
@@ -63,21 +107,32 @@ export class NotificationsGateway
    * Listen to BloodRequest status updates and notify recipient.
    */
   @OnEvent('blood-request.status.updated')
-  handleBloodRequestStatusUpdated(payload: any) {
-    this.logger.log(`WS Notification [BloodRequest]: ${payload.requestId} -> ${payload.newStatus}`);
+  handleBloodRequestStatusUpdated(payload: {
+    requestId: string;
+    newStatus: string;
+  }) {
+    this.logger.log(
+      `WS Notification [BloodRequest]: ${payload.requestId} -> ${payload.newStatus}`,
+    );
     this.server.emit('blood-request.status-changed', {
-       type: 'BLOOD_REQUEST',
-       id: payload.requestId,
-       newStatus: payload.newStatus,
-       timestamp: new Date()
+      type: 'BLOOD_REQUEST',
+      id: payload.requestId,
+      newStatus: payload.newStatus,
+      timestamp: new Date(),
     });
   }
 
-  emitToRecipient(recipientId: string, payload: any): void {
-    this.server
-      .to(`recipient_${recipientId}`)
-      .emit('notification.new', payload);
-    this.logger.log(`Emitted notification.new to recipient_${recipientId}`);
+  async emitToRecipient(
+    recipientId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const room = `recipient:${recipientId}`;
+    await this.roomEventBus.publish(
+      this.server,
+      room,
+      'notification.new',
+      payload,
+    );
+    this.logger.log(`Emitted notification.new to ${room}`);
   }
 }
-

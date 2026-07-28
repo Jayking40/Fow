@@ -10,7 +10,7 @@ export class InAppProvider {
 
   async send(recipientId: string, payload: any): Promise<void> {
     try {
-      this.gateway.emitToRecipient(recipientId, payload);
+      await this.gateway.emitToRecipient(recipientId, payload);
     } catch (error) {
       this.logger.error(
         `Error sending in-app notification to ${recipientId}`,

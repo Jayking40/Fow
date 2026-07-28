@@ -1,13 +1,15 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
+
 import Redis from 'ioredis';
 
 import { OrderConfirmedEvent, OrderRiderAssignedEvent } from '../events';
 import { MapsService } from '../maps/maps.service';
 import { PolicyCenterService } from '../policy-center/policy-center.service';
-import { RiderRecord, RidersService } from '../riders/riders.service';
 import { REDIS_CLIENT } from '../redis/redis.constants';
+import { RiderRecord, RidersService } from '../riders/riders.service';
+import { PresenceService } from '../websockets/presence.service';
 
 const DEDUP_TTL_SECONDS = 3600;
 const DEDUP_KEY_PREFIX = 'rider-assignment:dedup:';
@@ -27,6 +29,7 @@ export class RiderAssignmentService {
     private readonly configService: ConfigService,
     private readonly policyCenterService: PolicyCenterService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly presenceService: PresenceService,
   ) {
     this.defaultAcceptanceTimeoutMs = this.configService.get<number>(
       'ASSIGNMENT_ACCEPTANCE_TIMEOUT_MS',
@@ -43,17 +46,24 @@ export class RiderAssignmentService {
       return;
     }
 
-    this.logger.log(`Handling order confirmed for rider assignment: ${event.orderId}`);
+    this.logger.log(
+      `Handling order confirmed for rider assignment: ${event.orderId}`,
+    );
     await this.startAutomatedAssignment(event);
 
-    return { message: 'Rider assignment initiated', data: { orderId: event.orderId } };
+    return {
+      message: 'Rider assignment initiated',
+      data: { orderId: event.orderId },
+    };
   }
 
   /**
    * Reassign a delivery/order to a new backup rider after a cold-chain breach.
    */
   async reassign(orderId: string): Promise<void> {
-    this.logger.log(`Reassigning rider for order/delivery ${orderId} after cold-chain breach`);
+    this.logger.log(
+      `Reassigning rider for order/delivery ${orderId} after cold-chain breach`,
+    );
     const availableResponse = await this.ridersService.getAvailableRiders();
     const riders = availableResponse.data ?? [];
 
@@ -72,25 +82,36 @@ export class RiderAssignmentService {
     }
 
     const policyConfig = await this.getRuntimeAssignmentConfig();
-    const scored = await this.scoreRiders(riders, orderId, policyConfig.weights);
-    const ranked = scored.sort((a, b) => b.score.totalScore - a.score.totalScore);
-    const best = ranked[0];
+    const scored = await this.scoreRiders(
+      riders,
+      orderId,
+      policyConfig.weights,
+    );
+    const ranked = scored.sort(
+      (a, b) => b.score.totalScore - a.score.totalScore,
+    );
+    const prioritized = await this.preferOnlineRiders(ranked);
+    const best = prioritized[0];
 
     this.appendAssignmentLog({
       orderId,
       selectedRiderId: best.rider.id,
       status: 'pending',
       attemptNumber: 1,
-      candidates: ranked.map((r) => r.score),
+      candidates: prioritized.map((r) => r.score),
       weights: policyConfig.weights,
       reason: 'initial_assignment',
     });
 
-    this.eventEmitter.emit('order.rider.assigned', new OrderRiderAssignedEvent(orderId, best.rider.id));
+    this.eventEmitter.emit(
+      'order.rider.assigned',
+      new OrderRiderAssignedEvent(orderId, best.rider.id),
+    );
     this.logger.log(`Backup rider ${best.rider.id} assigned to ${orderId}`);
   }
 
-  async getAssignmentLogs(orderId?: string) {    const data = orderId
+  getAssignmentLogs(orderId?: string) {
+    const data = orderId
       ? this.assignmentLogs.filter((log) => log.orderId === orderId)
       : this.assignmentLogs;
 
@@ -100,11 +121,7 @@ export class RiderAssignmentService {
     };
   }
 
-  async respondToAssignment(
-    orderId: string,
-    riderId: string,
-    accepted: boolean,
-  ) {
+  respondToAssignment(orderId: string, riderId: string, accepted: boolean) {
     const assignment = this.activeAssignments.get(orderId);
     if (!assignment) {
       return {
@@ -159,7 +176,7 @@ export class RiderAssignmentService {
       reason: 'rider_rejected',
     });
 
-    await this.escalateAssignment(orderId, 'rider_rejected');
+    this.escalateAssignment(orderId, 'rider_rejected');
 
     return {
       message: 'Rider rejected assignment and escalation started',
@@ -223,10 +240,18 @@ export class RiderAssignmentService {
 
   private async acquireDedup(key: string): Promise<boolean> {
     try {
-      const result = await this.redis.set(key, '1', 'EX', DEDUP_TTL_SECONDS, 'NX');
+      const result = await this.redis.set(
+        key,
+        '1',
+        'EX',
+        DEDUP_TTL_SECONDS,
+        'NX',
+      );
       return result === 'OK';
     } catch (err) {
-      this.logger.error(`Dedup store error for key ${key}: ${(err as Error).message}`);
+      this.logger.error(
+        `Dedup store error for key ${key}: ${(err as Error).message}`,
+      );
       return true; // allow processing on Redis failure
     }
   }
@@ -252,14 +277,19 @@ export class RiderAssignmentService {
 
     const pickupPoint = event.deliveryAddress;
     const policyConfig = await this.getRuntimeAssignmentConfig();
-    const scored = await this.scoreRiders(riders, pickupPoint, policyConfig.weights);
+    const scored = await this.scoreRiders(
+      riders,
+      pickupPoint,
+      policyConfig.weights,
+    );
     const ranked = scored.sort(
       (a, b) => b.score.totalScore - a.score.totalScore,
     );
+    const prioritized = await this.preferOnlineRiders(ranked);
 
     const state: ActiveAssignmentState = {
       orderId: event.orderId,
-      candidates: ranked,
+      candidates: prioritized,
       currentIndex: 0,
       timeoutMs: policyConfig.acceptanceTimeoutMs,
       weights: policyConfig.weights,
@@ -343,6 +373,28 @@ export class RiderAssignmentService {
     });
   }
 
+  /**
+   * Stable-sorts confirmed-online riders ahead of the rest, without altering
+   * relative order among riders with the same presence status. Since most
+   * riders won't carry WebSocket presence data yet, `isOnline` is false for
+   * all of them uniformly in that case and this is a no-op — presence is a
+   * soft preference on top of the score ranking, not a hard exclusion.
+   */
+  private async preferOnlineRiders<T extends { rider: RiderRecord }>(
+    ranked: T[],
+  ): Promise<T[]> {
+    const flagged = await Promise.all(
+      ranked.map(async (item) => ({
+        item,
+        online: await this.presenceService.isOnline(item.rider.id),
+      })),
+    );
+
+    return flagged
+      .sort((a, b) => Number(b.online) - Number(a.online))
+      .map((f) => f.item);
+  }
+
   private normalizeLowerIsBetter(
     value: number,
     min: number,
@@ -400,10 +452,10 @@ export class RiderAssignmentService {
     assignment.timer.unref?.();
   }
 
-  private async escalateAssignment(
+  private escalateAssignment(
     orderId: string,
     reason: AssignmentLogReason,
-  ): Promise<void> {
+  ): void {
     const assignment = this.activeAssignments.get(orderId);
     if (!assignment) {
       return;
