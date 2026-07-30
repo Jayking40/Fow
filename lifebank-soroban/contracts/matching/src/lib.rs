@@ -17,6 +17,17 @@ pub use types::{
 
 use soroban_sdk::{contract, contractclient, contractimpl, Address, Env, Vec};
 
+// Credential type mirrored from identity contract (no cross-crate dep needed).
+#[soroban_sdk::contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialType {
+    MedicalFacilityLicense,
+    RiderCertification,
+    BloodBankAccreditation,
+    DonorEligibility,
+    LabAccreditation,
+}
+
 // ---------------------------------------------------------------------------
 // Cross-contract client interfaces
 // ---------------------------------------------------------------------------
@@ -32,6 +43,12 @@ pub trait InventoryContractInterface {
 #[contractclient(name = "RequestsContractClient")]
 pub trait RequestsContractInterface {
     fn get_request(env: Env, request_id: u64) -> BloodRequest;
+}
+
+/// Minimal interface to the identity contract for credential gating.
+#[contractclient(name = "IdentityContractClient")]
+pub trait IdentityContractInterface {
+    fn is_valid(env: Env, subject: Address, cred: CredentialType, allow_grace: bool) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +194,26 @@ impl MatchingContract {
 
         if request.status != RequestStatus::Pending {
             return Err(MatchingError::InvalidRequest);
+        }
+
+        // Gate: hospital must hold a valid MedicalFacilityLicense.
+        if let Some(identity_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::IdentityContract)
+        {
+            let id_client = IdentityContractClient::new(&env, &identity_addr);
+            let credentialed = id_client
+                .try_is_valid(
+                    &request.hospital_id,
+                    &CredentialType::MedicalFacilityLicense,
+                    &false,
+                )
+                .unwrap_or(Ok(false))
+                .unwrap_or(false);
+            if !credentialed {
+                return Err(MatchingError::Unauthorized);
+            }
         }
 
         // Collect all candidate units across compatible blood types

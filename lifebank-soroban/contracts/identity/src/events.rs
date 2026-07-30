@@ -11,7 +11,7 @@
 //! instead of publishing raw events themselves, so the event can never be
 //! published twice for a single verification/unverification.
 
-use crate::{BadgeType, OrgType};
+use crate::{attestation::CredentialType, BadgeType, OrgType};
 use lifebank_interfaces::envelope::{self, SCHEMA_V1};
 use lifebank_interfaces::events::common::InitializedEvent;
 use lifebank_interfaces::events::identity as ev;
@@ -196,5 +196,52 @@ pub fn emit_delivery_verified(
             temperature_ok,
             verified_at,
         },
+    );
+}
+
+pub fn emit_attested(
+    env: &Env,
+    attestation_id: u64,
+    subject: &Address,
+    cred: CredentialType,
+    issuer: &Address,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "attested"), symbol_short!("v1")),
+        (attestation_id, subject.clone(), cred, issuer.clone(), expires_at),
+    );
+}
+
+pub fn emit_att_revoked(
+    env: &Env,
+    attestation_id: u64,
+    subject: &Address,
+    cred: CredentialType,
+    reason_code: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "att_revoked"), symbol_short!("v1")),
+        (attestation_id, subject.clone(), cred, reason_code),
+    );
+}
+
+pub fn emit_att_renewed(
+    env: &Env,
+    old_id: u64,
+    new_id: u64,
+    subject: &Address,
+    cred: CredentialType,
+) {
+    env.events().publish(
+        (Symbol::new(env, "att_renewed"), symbol_short!("v1")),
+        (old_id, new_id, subject.clone(), cred),
+    );
+}
+
+pub fn emit_issuer_flagged(env: &Env, issuer: &Address, flagged_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "iss_flagged"), symbol_short!("v1")),
+        (issuer.clone(), flagged_count),
     );
 }
