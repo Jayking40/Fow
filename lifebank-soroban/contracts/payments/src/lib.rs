@@ -5,6 +5,29 @@ use soroban_sdk::{
     Vec,
 };
 
+// Credential type mirrored from identity contract.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialType {
+    MedicalFacilityLicense,
+    RiderCertification,
+    BloodBankAccreditation,
+    DonorEligibility,
+    LabAccreditation,
+}
+
+mod identity_client {
+    use super::CredentialType;
+    use soroban_sdk::{contractclient, Address, Env};
+
+    #[contractclient(name = "IdentityContractClient")]
+    pub trait IdentityContractInterface {
+        fn is_valid(env: Env, subject: Address, cred: CredentialType, allow_grace: bool) -> bool;
+    }
+}
+
+use identity_client::IdentityContractClient;
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -169,6 +192,8 @@ const REQ_IDX: soroban_sdk::Symbol = symbol_short!("REQ_IDX");
 const STATS_KEY: soroban_sdk::Symbol = symbol_short!("STATS");
 /// Instance storage key for the requests contract address (optional).
 const REQ_CONTRACT: soroban_sdk::Symbol = symbol_short!("REQ_CTR");
+/// Instance storage key for the identity contract address (optional).
+const IDENTITY_CONTRACT: soroban_sdk::Symbol = symbol_short!("ID_CTR");
 /// Default dispute auto-refund timeout in seconds (7 days).
 const DEFAULT_DISPUTE_TIMEOUT_SECS: u64 = 7 * 24 * 3600;
 /// Instance storage key for the dispute timeout override.
@@ -847,6 +872,27 @@ impl PaymentContract {
 
         if payment.status != PaymentStatus::Locked {
             return Err(Error::PaymentNotLocked);
+        }
+
+        // Gate: payee must hold a valid BloodBankAccreditation at settlement time.
+        if let Some(identity_addr) = env
+            .storage()
+            .instance()
+            .get::<soroban_sdk::Symbol, Address>(&IDENTITY_CONTRACT)
+        {
+            let id_client = IdentityContractClient::new(&env, &identity_addr);
+            // allow_grace=true: in-flight workflow — grace policy applies.
+            let credentialed = id_client
+                .try_is_valid(
+                    &payment.payee,
+                    &CredentialType::BloodBankAccreditation,
+                    &true,
+                )
+                .unwrap_or(Ok(false))
+                .unwrap_or(false);
+            if !credentialed {
+                return Err(Error::Unauthorized);
+            }
         }
 
         let token_addr = payment.token.clone().ok_or(Error::NotEscrowPayment)?;

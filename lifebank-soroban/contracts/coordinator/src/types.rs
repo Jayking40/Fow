@@ -54,6 +54,7 @@ pub enum DataKey {
     RequestContract,
     InventoryContract,
     PaymentContract,
+    IdentityContract,
     Workflow(u64),
     /// Granular pause flags — stored as Option<u64> (paused_at timestamp).
     /// "Paused" is the legacy single bool kept for compat; new code uses PauseFlag.

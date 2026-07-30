@@ -453,6 +453,27 @@ impl CoordinatorContract {
             return Err(CoordinatorError::AlreadyDone);
         }
 
+        // Re-check facility credential at allocation time (may have expired since request).
+        // Uses caller as the facility subject — caller must hold MedicalFacilityLicense.
+        if let Some(identity_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::IdentityContract)
+        {
+            let id_client = IdentityContractClient::new(&env, &identity_addr);
+            let credentialed = id_client
+                .try_is_valid(
+                    &caller,
+                    &CredentialType::MedicalFacilityLicense,
+                    &false,
+                )
+                .unwrap_or(Ok(false))
+                .unwrap_or(false);
+            if !credentialed {
+                return Err(CoordinatorError::Unauthorized);
+            }
+        }
+
         // Verify request is Pending
         let req_addr: Address = env
             .storage()
