@@ -20,6 +20,31 @@ pub use types::{DataKey, ExcursionSummary, WorkflowRecord, WorkflowStatus};
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
+mod events;
+
+// Credential type mirrored from identity contract.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialType {
+    MedicalFacilityLicense,
+    RiderCertification,
+    BloodBankAccreditation,
+    DonorEligibility,
+    LabAccreditation,
+}
+
+mod identity_client {
+    use super::CredentialType;
+    use soroban_sdk::{contractclient, Address, Env};
+
+    #[contractclient(name = "IdentityContractClient")]
+    pub trait IdentityContractInterface {
+        fn is_valid(env: Env, subject: Address, cred: CredentialType, allow_grace: bool) -> bool;
+    }
+}
+
+use identity_client::IdentityContractClient;
+
 // ── Minimal interface types mirroring the domain contracts ────────────────────
 // These allow the coordinator to inspect cross-contract return values without
 // importing compiled WASMs. The domain contracts must keep these in sync.
@@ -314,6 +339,27 @@ impl CoordinatorContract {
 
         if load_workflow(&env, request_id).is_some() {
             return Err(CoordinatorError::AlreadyDone);
+        }
+
+        // Re-check facility credential at allocation time (may have expired since request).
+        // Uses caller as the facility subject — caller must hold MedicalFacilityLicense.
+        if let Some(identity_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::IdentityContract)
+        {
+            let id_client = IdentityContractClient::new(&env, &identity_addr);
+            let credentialed = id_client
+                .try_is_valid(
+                    &caller,
+                    &CredentialType::MedicalFacilityLicense,
+                    &false,
+                )
+                .unwrap_or(Ok(false))
+                .unwrap_or(false);
+            if !credentialed {
+                return Err(CoordinatorError::Unauthorized);
+            }
         }
 
         // Verify request is Pending

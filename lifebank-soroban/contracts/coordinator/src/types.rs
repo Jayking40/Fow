@@ -52,6 +52,7 @@ pub enum DataKey {
     RequestContract,
     InventoryContract,
     PaymentContract,
+    IdentityContract,
     Workflow(u64),
     Paused,
 }
