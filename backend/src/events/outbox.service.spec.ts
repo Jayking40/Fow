@@ -2,8 +2,17 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 
-import { DeadLetterStatus, OutboxDeadLetterEntity } from './outbox-dead-letter.entity';
-import { OutboxEventEntity, OutboxEventStatus, OutboxEventType } from './outbox-event.entity';
+import { EntityManager } from 'typeorm';
+
+import {
+  DeadLetterStatus,
+  OutboxDeadLetterEntity,
+} from './outbox-dead-letter.entity';
+import {
+  OutboxEventEntity,
+  OutboxEventStatus,
+  OutboxEventType,
+} from './outbox-event.entity';
 import { OutboxService } from './outbox.service';
 
 function makeOutboxEvent(
@@ -36,31 +45,36 @@ function makeOutboxEvent(
 
 describe('OutboxService', () => {
   let service: OutboxService;
-  let outboxRepo: Record<string, jest.Mock>;
+  let outboxRepo: Record<string, jest.Mock> & { manager: { query: jest.Mock } };
   let deadLetterRepo: Record<string, jest.Mock>;
 
   beforeEach(async () => {
     outboxRepo = {
-      create: jest.fn((dto) => ({ id: 'evt-1', ...dto })),
-      save: jest.fn((e) => Promise.resolve({ id: 'evt-1', ...e })),
+      create: jest.fn((dto: Record<string, unknown>) => ({
+        id: 'evt-1',
+        ...dto,
+      })),
+      save: jest.fn((e: Record<string, unknown>) =>
+        Promise.resolve({ id: 'evt-1', ...e }),
+      ),
       findOne: jest.fn(() => Promise.resolve(makeOutboxEvent())),
       find: jest.fn(() => Promise.resolve([])),
       update: jest.fn(() => Promise.resolve({ affected: 1 })),
       increment: jest.fn(() => Promise.resolve(undefined)),
       delete: jest.fn(() => Promise.resolve({ affected: 0 })),
-      createQueryBuilder: jest.fn(() => ({
-        update: jest.fn().mockReturnThis(),
-        set: jest.fn().mockReturnThis(),
-        where: jest.fn().mockReturnThis(),
-        andWhere: jest.fn().mockReturnThis(),
-        limit: jest.fn().mockReturnThis(),
-        execute: jest.fn(() => Promise.resolve({ affected: 2 })),
-      })),
+      manager: {
+        query: jest.fn(() => Promise.resolve([])),
+      },
     };
 
     deadLetterRepo = {
-      create: jest.fn((dto) => ({ id: 'dl-1', ...dto })),
-      save: jest.fn((e) => Promise.resolve({ id: 'dl-1', ...e })),
+      create: jest.fn((dto: Record<string, unknown>) => ({
+        id: 'dl-1',
+        ...dto,
+      })),
+      save: jest.fn((e: Record<string, unknown>) =>
+        Promise.resolve({ id: 'dl-1', ...e }),
+      ),
       findOne: jest.fn(() => Promise.resolve(null)),
       find: jest.fn(() => Promise.resolve([])),
       update: jest.fn(() => Promise.resolve({ affected: 1 })),
@@ -69,8 +83,14 @@ describe('OutboxService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         OutboxService,
-        { provide: getRepositoryToken(OutboxEventEntity), useValue: outboxRepo },
-        { provide: getRepositoryToken(OutboxDeadLetterEntity), useValue: deadLetterRepo },
+        {
+          provide: getRepositoryToken(OutboxEventEntity),
+          useValue: outboxRepo,
+        },
+        {
+          provide: getRepositoryToken(OutboxDeadLetterEntity),
+          useValue: deadLetterRepo,
+        },
       ],
     }).compile();
 
@@ -92,7 +112,10 @@ describe('OutboxService', () => {
 
     it('generates a dedup key', async () => {
       await service.publishEvent(OutboxEventType.BLOOD_REQUEST_CREATED, {});
-      const createCall = outboxRepo.create.mock.calls[0][0];
+      const calls = outboxRepo.create.mock.calls as Array<
+        [{ dedupKey: string }]
+      >;
+      const createCall = calls[0][0];
       expect(createCall.dedupKey).toBeDefined();
       expect(createCall.dedupKey.length).toBeGreaterThan(0);
     });
@@ -101,11 +124,16 @@ describe('OutboxService', () => {
   describe('publishInTransaction — atomicity', () => {
     it('uses the provided EntityManager to insert in the same transaction', async () => {
       const em = {
-        create: jest.fn((_, dto) => ({ id: 'evt-tx', ...dto })),
-        save: jest.fn((_, e) => Promise.resolve({ id: 'evt-tx', ...e })),
+        create: jest.fn((_: unknown, dto: Record<string, unknown>) => ({
+          id: 'evt-tx',
+          ...dto,
+        })),
+        save: jest.fn((_: unknown, e: Record<string, unknown>) =>
+          Promise.resolve({ id: 'evt-tx', ...e }),
+        ),
       };
       const result = await service.publishInTransaction(
-        em as any,
+        em as unknown as EntityManager,
         OutboxEventType.BLOOD_REQUEST_CREATED,
         { requestId: 'req-1' },
         { aggregateId: 'req-1', correlationId: 'corr-1' },
@@ -116,11 +144,51 @@ describe('OutboxService', () => {
   });
 
   describe('claimPendingEvents — lease-based polling', () => {
-    it('returns claimed events for the worker', async () => {
-      outboxRepo.find.mockResolvedValue([makeOutboxEvent()]);
+    it('runs a single atomic UPDATE ... RETURNING and maps rows back to entity shape', async () => {
+      outboxRepo.manager.query.mockResolvedValue([
+        {
+          id: 'evt-1',
+          aggregate_id: 'req-1',
+          aggregate_type: 'BloodRequest',
+          event_type: OutboxEventType.BLOOD_REQUEST_CREATED,
+          event_version: 1,
+          correlation_id: 'corr-1',
+          payload: { requestId: 'req-1' },
+          status: OutboxEventStatus.PROCESSING,
+          dedup_key: 'dedup-key-1',
+          lease_holder: 'worker-1',
+          lease_expires_at: new Date(),
+          attempt_count: 0,
+          next_attempt_at: null,
+          last_error: null,
+          published_at: null,
+          published: false,
+          retry_count: 0,
+          error: null,
+          created_at: new Date(),
+          updated_at: new Date(),
+          sequence: '1',
+        },
+      ]);
+
       const events = await service.claimPendingEvents('worker-1', 10);
-      expect(outboxRepo.createQueryBuilder).toHaveBeenCalled();
-      expect(events.length).toBeGreaterThanOrEqual(0);
+
+      expect(outboxRepo.manager.query).toHaveBeenCalledTimes(1);
+      const [sql] = outboxRepo.manager.query.mock.calls[0] as [string];
+      expect(sql).toMatch(/FOR UPDATE SKIP LOCKED/);
+      expect(sql).toMatch(/RETURNING \*/);
+
+      expect(events).toHaveLength(1);
+      expect(events[0].id).toBe('evt-1');
+      expect(events[0].aggregateId).toBe('req-1');
+      expect(events[0].eventType).toBe(OutboxEventType.BLOOD_REQUEST_CREATED);
+      expect(events[0].leaseHolder).toBe('worker-1');
+    });
+
+    it('returns an empty array when nothing is claimable', async () => {
+      outboxRepo.manager.query.mockResolvedValue([]);
+      const events = await service.claimPendingEvents('worker-1', 10);
+      expect(events).toEqual([]);
     });
   });
 
@@ -139,7 +207,9 @@ describe('OutboxService', () => {
 
   describe('recordFailure — backoff and dead-letter', () => {
     it('schedules retry with exponential backoff on first failure', async () => {
-      outboxRepo.findOne.mockResolvedValue(makeOutboxEvent({ attemptCount: 0 }));
+      outboxRepo.findOne.mockResolvedValue(
+        makeOutboxEvent({ attemptCount: 0 }),
+      );
       await service.recordFailure('evt-1', 'timeout');
       expect(outboxRepo.update).toHaveBeenCalledWith(
         'evt-1',
@@ -151,7 +221,9 @@ describe('OutboxService', () => {
     });
 
     it('moves to dead-letter when max attempts exceeded', async () => {
-      outboxRepo.findOne.mockResolvedValue(makeOutboxEvent({ attemptCount: 4 }));
+      outboxRepo.findOne.mockResolvedValue(
+        makeOutboxEvent({ attemptCount: 4 }),
+      );
       await service.recordFailure('evt-1', 'persistent error');
       expect(deadLetterRepo.save).toHaveBeenCalled();
       expect(outboxRepo.update).toHaveBeenCalledWith(

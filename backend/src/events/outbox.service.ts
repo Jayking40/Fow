@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto';
 
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+
 import { EntityManager, LessThan, Repository } from 'typeorm';
 
 import {
@@ -128,9 +129,38 @@ export class OutboxService {
   // ── Lease-based polling ──────────────────────────────────────────────
 
   /**
-   * Claim up to `limit` PENDING events by acquiring a lease.
-   * Events with an active lease held by another worker are skipped.
-   * Events whose nextAttemptAt is in the future are skipped (backoff).
+   * Claim up to `limit` events by acquiring a lease, respecting:
+   *  - PENDING events, or PROCESSING events whose lease has expired
+   *    (crashed-worker recovery)
+   *  - backoff (nextAttemptAt in the future is skipped)
+   *  - attemptCount < MAX_ATTEMPTS
+   *  - per-aggregate ordering: an event is only claimable if no earlier
+   *    (lower `sequence`) event for the same aggregate is still
+   *    PENDING/PROCESSING — this is what stops event N+1 from being
+   *    dispatched while event N sits unacknowledged.
+   *
+   * Implemented as raw SQL rather than the query builder: the claim needs a
+   * single atomic `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP
+   * LOCKED) RETURNING *`, where the inner SELECT carries a correlated
+   * NOT EXISTS anti-join for the per-aggregate check. TypeORM's
+   * query-builder cannot express a correlated subquery combined with
+   * FOR UPDATE SKIP LOCKED and RETURNING as one statement, and splitting it
+   * into an UPDATE followed by a separate SELECT (the previous
+   * implementation) reopens the exact race this rewrite closes: two
+   * instances' UPDATEs can both match the same row-set before either one's
+   * effects are visible to the other's WHERE clause.
+   *
+   * Query plan: the outer scan uses the partial index
+   * `idx_outbox_claim_candidates (sequence) WHERE status = 'PENDING'`
+   * (Bitmap/Index Scan, already sorted by sequence — no separate sort
+   * node), with the expired-lease PROCESSING branch caught by
+   * `idx_outbox_lease_expires`. For every candidate row the anti-join
+   * probes `idx_outbox_aggregate_unresolved (aggregate_id, sequence) WHERE
+   * status IN ('PENDING','PROCESSING')` — an index-only existence probe
+   * bounded by `sequence < oe.sequence`, i.e. O(log n) per candidate rather
+   * than a self-join over the whole table. FOR UPDATE SKIP LOCKED applies
+   * only to `oe` (the outer table) — the NOT EXISTS subquery is read-only
+   * and never blocks or gets skipped itself.
    */
   async claimPendingEvents(
     workerId: string,
@@ -139,38 +169,52 @@ export class OutboxService {
     const now = new Date();
     const leaseExpiry = new Date(now.getTime() + LEASE_TTL_MS);
 
-    // Atomically claim events: status=PENDING, no active lease, backoff elapsed
-    const result = await this.outboxRepo
-      .createQueryBuilder()
-      .update(OutboxEventEntity)
-      .set({
-        status: OutboxEventStatus.PROCESSING,
-        leaseHolder: workerId,
-        leaseExpiresAt: leaseExpiry,
-      })
-      .where('status = :status', { status: OutboxEventStatus.PENDING })
-      .andWhere(
-        '(lease_expires_at IS NULL OR lease_expires_at < :now)',
-        { now },
+    const rows = await this.outboxRepo.manager.query<Record<string, unknown>[]>(
+      `
+      UPDATE outbox_events
+      SET status = $1::outbox_events_status_enum,
+          lease_holder = $2::varchar,
+          lease_expires_at = $3::timestamptz,
+          updated_at = now()
+      WHERE id IN (
+        SELECT oe.id
+        FROM outbox_events oe
+        WHERE (
+            oe.status = $4::outbox_events_status_enum
+            OR (
+              oe.status = $1::outbox_events_status_enum
+              AND oe.lease_expires_at < $5::timestamptz
+            )
+          )
+          AND (oe.next_attempt_at IS NULL OR oe.next_attempt_at <= $5::timestamptz)
+          AND oe.attempt_count < $6::int
+          AND NOT EXISTS (
+            SELECT 1
+            FROM outbox_events blocker
+            WHERE blocker.aggregate_id = oe.aggregate_id
+              AND blocker.status IN ($4::outbox_events_status_enum, $1::outbox_events_status_enum)
+              AND blocker.sequence < oe.sequence
+          )
+        ORDER BY oe.sequence ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT $7::int
       )
-      .andWhere(
-        '(next_attempt_at IS NULL OR next_attempt_at <= :now)',
-        { now },
-      )
-      .andWhere('attempt_count < :max', { max: MAX_ATTEMPTS })
-      .limit(limit)
-      .execute();
+      RETURNING *
+      `,
+      [
+        OutboxEventStatus.PROCESSING,
+        workerId,
+        leaseExpiry,
+        OutboxEventStatus.PENDING,
+        now,
+        MAX_ATTEMPTS,
+        limit,
+      ],
+    );
 
-    if (!result.affected) return [];
-
-    return this.outboxRepo.find({
-      where: {
-        status: OutboxEventStatus.PROCESSING,
-        leaseHolder: workerId,
-      },
-      order: { createdAt: 'ASC' },
-      take: limit,
-    });
+    return rows
+      .map((row) => this.mapRawEventRow(row))
+      .sort((a, b) => Number(a.sequence) - Number(b.sequence));
   }
 
   /**
@@ -285,7 +329,8 @@ export class OutboxService {
     const dl = await this.deadLetterRepo.findOne({
       where: { id: deadLetterId },
     });
-    if (!dl) throw new NotFoundException(`Dead-letter '${deadLetterId}' not found`);
+    if (!dl)
+      throw new NotFoundException(`Dead-letter '${deadLetterId}' not found`);
 
     // Re-insert as a fresh PENDING event with a new dedup key to avoid conflict
     const newDedupKey = `replay:${deadLetterId}:${Date.now()}`;
@@ -332,7 +377,8 @@ export class OutboxService {
     const dl = await this.deadLetterRepo.findOne({
       where: { id: deadLetterId },
     });
-    if (!dl) throw new NotFoundException(`Dead-letter '${deadLetterId}' not found`);
+    if (!dl)
+      throw new NotFoundException(`Dead-letter '${deadLetterId}' not found`);
 
     dl.status = DeadLetterStatus.DISCARDED;
     if (operatorNotes) dl.operatorNotes = operatorNotes;
@@ -371,6 +417,38 @@ export class OutboxService {
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * `manager.query` returns raw driver rows (snake_case columns), not
+   * entity instances — map the claim query's RETURNING * back to
+   * OutboxEventEntity's camelCase shape so callers (OutboxProducer.deliver)
+   * see the same fields they'd get from the repository API.
+   */
+  private mapRawEventRow(row: Record<string, unknown>): OutboxEventEntity {
+    return {
+      id: row.id,
+      aggregateId: row.aggregate_id,
+      aggregateType: row.aggregate_type,
+      eventType: row.event_type,
+      eventVersion: row.event_version,
+      correlationId: row.correlation_id,
+      payload: row.payload,
+      status: row.status,
+      dedupKey: row.dedup_key,
+      leaseHolder: row.lease_holder,
+      leaseExpiresAt: row.lease_expires_at,
+      attemptCount: row.attempt_count,
+      nextAttemptAt: row.next_attempt_at,
+      lastError: row.last_error,
+      publishedAt: row.published_at,
+      published: row.published,
+      retryCount: row.retry_count,
+      error: row.error,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      sequence: row.sequence,
+    } as unknown as OutboxEventEntity;
+  }
 
   private buildDedupKey(
     aggregateId: string,
