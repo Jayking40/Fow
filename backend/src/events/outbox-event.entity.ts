@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Generated,
   Index,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
@@ -44,6 +45,10 @@ export enum OutboxEventStatus {
 @Index('idx_outbox_correlation', ['correlationId'])
 @Index('idx_outbox_dedup_key', ['dedupKey'], { unique: true })
 @Index('idx_outbox_lease_expires', ['leaseExpiresAt'])
+// Claim-path indexes — see migration AddOutboxSkipLockedClaim for the
+// partial-index definitions these are shorthand for.
+@Index('idx_outbox_claim_candidates', ['sequence'])
+@Index('idx_outbox_aggregate_unresolved', ['aggregateId', 'sequence'])
 // Legacy indexes kept for backward compatibility
 @Index('IDX_OUTBOX_PUBLISHED', ['published'])
 @Index('IDX_OUTBOX_EVENT_TYPE', ['eventType'])
@@ -55,11 +60,21 @@ export class OutboxEventEntity {
   // ── Domain-event envelope ─────────────────────────────────────────────
 
   /** Aggregate identifier (e.g. blood request id, order id) */
-  @Column({ name: 'aggregate_id', type: 'varchar', length: 128, nullable: true })
+  @Column({
+    name: 'aggregate_id',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+  })
   aggregateId: string | null;
 
   /** Aggregate type (e.g. "BloodRequest", "Order") */
-  @Column({ name: 'aggregate_type', type: 'varchar', length: 100, nullable: true })
+  @Column({
+    name: 'aggregate_type',
+    type: 'varchar',
+    length: 100,
+    nullable: true,
+  })
   aggregateType: string | null;
 
   /** Normalized event type */
@@ -71,7 +86,12 @@ export class OutboxEventEntity {
   eventVersion: number;
 
   /** Correlation id for distributed tracing across modules */
-  @Column({ name: 'correlation_id', type: 'varchar', length: 128, nullable: true })
+  @Column({
+    name: 'correlation_id',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+  })
   correlationId: string | null;
 
   /** Normalized event payload */
@@ -92,7 +112,12 @@ export class OutboxEventEntity {
   dedupKey: string;
 
   /** Dispatcher worker id that holds the current lease */
-  @Column({ name: 'lease_holder', type: 'varchar', length: 128, nullable: true })
+  @Column({
+    name: 'lease_holder',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+  })
   leaseHolder: string | null;
 
   /** Lease expiry — if expired, another worker may claim the event */
@@ -130,4 +155,15 @@ export class OutboxEventEntity {
 
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
+
+  /**
+   * Monotonic insertion-order counter. The primary key is a random uuid so
+   * it cannot recover insertion order, and created_at (timestamptz) can
+   * collide across rows written in the same statement/millisecond — neither
+   * is safe to sort or anti-join on for per-aggregate ordering guarantees.
+   * Never set explicitly; the DB assigns it via nextval() on insert.
+   */
+  @Generated('increment')
+  @Column({ name: 'sequence', type: 'bigint' })
+  sequence: number;
 }
