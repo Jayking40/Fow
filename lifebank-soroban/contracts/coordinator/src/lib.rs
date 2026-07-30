@@ -20,6 +20,10 @@ pub use types::{DataKey, ExcursionSummary, WorkflowRecord, WorkflowStatus};
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
+/// Maximum duration any pause flag may remain active (30 days).
+/// After this window all workflow paths auto-enable even if admin keys are lost.
+pub const MAX_PAUSE_SECS: u64 = 30 * 24 * 3600;
+
 // ── Minimal interface types mirroring the domain contracts ────────────────────
 // These allow the coordinator to inspect cross-contract return values without
 // importing compiled WASMs. The domain contracts must keep these in sync.
@@ -249,8 +253,13 @@ impl CoordinatorContract {
         Ok(())
     }
 
-    /// Pause all state-mutating functions. Admin only.
-    pub fn pause(env: Env, admin: Address) -> Result<(), CoordinatorError> {
+    /// Set the guardian address. Admin only.
+    /// Guardian can pause any flag instantly; only Admin can unpause.
+    pub fn set_guardian(
+        env: Env,
+        admin: Address,
+        guardian: Address,
+    ) -> Result<(), CoordinatorError> {
         admin.require_auth();
         let stored: Address = env
             .storage()
@@ -260,11 +269,139 @@ impl CoordinatorContract {
         if admin != stored {
             return Err(CoordinatorError::Unauthorized);
         }
-        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
+        env.events().publish(
+            (symbol_short!("coord"), symbol_short!("guardian")),
+            guardian,
+        );
         Ok(())
     }
 
-    /// Unpause the contract. Admin only.
+    /// Pause a specific operation flag. Guardian or Admin only.
+    /// `flag`: symbol_short!("alloc") | symbol_short!("dlvr") | symbol_short!("settl").
+    /// Pausing "alloc" does NOT block refund/rollback — exit paths remain open.
+    pub fn pause_flag(
+        env: Env,
+        caller: Address,
+        flag: soroban_sdk::Symbol,
+    ) -> Result<(), CoordinatorError> {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        let guardian: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        if caller != admin && guardian.as_ref() != Some(&caller) {
+            return Err(CoordinatorError::Unauthorized);
+        }
+        Self::validate_flag(&flag)?;
+        let now = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey::PauseFlag(flag.clone()), &now);
+        env.events().publish(
+            (symbol_short!("coord"), symbol_short!("paused")),
+            (flag, now),
+        );
+        Ok(())
+    }
+
+    /// Unpause a specific operation flag. Admin only.
+    /// Unpausing "settl" (settlement/release) requires the timelock to have elapsed.
+    pub fn unpause_flag(
+        env: Env,
+        admin: Address,
+        flag: soroban_sdk::Symbol,
+    ) -> Result<(), CoordinatorError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        if admin != stored {
+            return Err(CoordinatorError::Unauthorized);
+        }
+        Self::validate_flag(&flag)?;
+        // Settlement flag is funds-critical: require timelock before unpausing.
+        if flag == symbol_short!("settl") {
+            if let Some(paused_at) = env
+                .storage()
+                .instance()
+                .get::<_, u64>(&DataKey::PauseFlag(flag.clone()))
+            {
+                let now = env.ledger().timestamp();
+                if now < paused_at + UPGRADE_TIMELOCK_SECS {
+                    return Err(CoordinatorError::TimelockNotElapsed);
+                }
+            }
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PauseFlag(flag.clone()));
+        env.events().publish(
+            (symbol_short!("coord"), symbol_short!("unpaused")),
+            flag,
+        );
+        Ok(())
+    }
+
+    /// Returns whether a specific flag is currently paused (within safety window).
+    pub fn is_flag_paused(env: Env, flag: soroban_sdk::Symbol) -> bool {
+        Self::flag_is_paused_now(&env, &flag)
+    }
+
+    fn validate_flag(flag: &soroban_sdk::Symbol) -> Result<(), CoordinatorError> {
+        if *flag == symbol_short!("alloc")
+            || *flag == symbol_short!("dlvr")
+            || *flag == symbol_short!("settl")
+        {
+            Ok(())
+        } else {
+            Err(CoordinatorError::UnknownPauseFlag)
+        }
+    }
+
+    fn flag_is_paused_now(env: &Env, flag: &soroban_sdk::Symbol) -> bool {
+        match env
+            .storage()
+            .instance()
+            .get::<_, u64>(&DataKey::PauseFlag(flag.clone()))
+        {
+            None => false,
+            Some(paused_at) => {
+                let now = env.ledger().timestamp();
+                now < paused_at + MAX_PAUSE_SECS
+            }
+        }
+    }
+
+    /// Legacy single-flag pause — pauses the "alloc" flag only.
+    /// Rollback and expire remain callable. Admin or Guardian only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), CoordinatorError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        let guardian: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        if admin != stored && guardian.as_ref() != Some(&admin) {
+            return Err(CoordinatorError::Unauthorized);
+        }
+        let now = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey::PauseFlag(symbol_short!("alloc")), &now);
+        env.events().publish(
+            (symbol_short!("coord"), symbol_short!("paused")),
+            (symbol_short!("alloc"), now),
+        );
+        Ok(())
+    }
+
+    /// Legacy single-flag unpause — unpauses the "alloc" flag. Admin only.
     pub fn unpause(env: Env, admin: Address) -> Result<(), CoordinatorError> {
         admin.require_auth();
         let stored: Address = env
@@ -275,25 +412,23 @@ impl CoordinatorContract {
         if admin != stored {
             return Err(CoordinatorError::Unauthorized);
         }
-        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PauseFlag(symbol_short!("alloc")));
+        env.events().publish(
+            (symbol_short!("coord"), symbol_short!("unpaused")),
+            symbol_short!("alloc"),
+        );
         Ok(())
     }
 
-    /// Returns whether the contract is currently paused.
+    /// Returns true if the "alloc" flag is paused (legacy compat).
     pub fn is_paused(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
+        Self::flag_is_paused_now(&env, &symbol_short!("alloc"))
     }
 
     fn require_not_paused(env: &Env) -> Result<(), CoordinatorError> {
-        if env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-        {
+        if Self::flag_is_paused_now(env, &symbol_short!("alloc")) {
             return Err(CoordinatorError::ContractPaused);
         }
         Ok(())
@@ -309,7 +444,9 @@ impl CoordinatorContract {
     ) -> Result<(), CoordinatorError> {
         caller.require_auth();
         Self::require_initialized(&env)?;
-        Self::require_not_paused(&env)?;
+        if Self::flag_is_paused_now(&env, &symbol_short!("alloc")) {
+            return Err(CoordinatorError::ContractPaused);
+        }
         Self::require_compatible_domain_contracts(&env)?;
 
         if load_workflow(&env, request_id).is_some() {
@@ -390,7 +527,9 @@ impl CoordinatorContract {
     ) -> Result<(), CoordinatorError> {
         caller.require_auth();
         Self::require_initialized(&env)?;
-        Self::require_not_paused(&env)?;
+        if Self::flag_is_paused_now(&env, &symbol_short!("dlvr")) {
+            return Err(CoordinatorError::ContractPaused);
+        }
         Self::require_compatible_domain_contracts(&env)?;
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
@@ -401,6 +540,15 @@ impl CoordinatorContract {
 
         if wf.status != WorkflowStatus::Allocated {
             return Err(CoordinatorError::InvalidWorkflowState);
+        }
+        // Extend deadline by pause duration so users are not penalised.
+        if let Some(paused_at) = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&DataKey::PauseFlag(symbol_short!("dlvr")))
+        {
+            let pause_duration = env.ledger().timestamp().saturating_sub(paused_at);
+            wf.allocation_deadline = wf.allocation_deadline.saturating_add(pause_duration);
         }
 
         let inv_addr: Address = env
@@ -449,7 +597,9 @@ impl CoordinatorContract {
     ) -> Result<(), CoordinatorError> {
         caller.require_auth();
         Self::require_initialized(&env)?;
-        Self::require_not_paused(&env)?;
+        if Self::flag_is_paused_now(&env, &symbol_short!("settl")) {
+            return Err(CoordinatorError::ContractPaused);
+        }
         Self::require_compatible_domain_contracts(&env)?;
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;

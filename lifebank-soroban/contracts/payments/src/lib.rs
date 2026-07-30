@@ -117,7 +117,10 @@ pub enum Error {
     NotPledgeDonor = 504,
     InsufficientEscrowFunds = 505,
     Unauthorized = 506,
+    /// The specific operation flag is paused (granular circuit-breaker).
     ContractPaused = 507,
+    /// The requested pause flag does not exist.
+    UnknownPauseFlag = 530,
     CliffNotReached = 508,
     VestingNotFound = 509,
     NothingToClaim = 510,
@@ -148,7 +151,17 @@ pub enum Error {
 const PAYMENT_COUNTER: soroban_sdk::Symbol = symbol_short!("PAY_CTR");
 const PLEDGE_COUNTER: soroban_sdk::Symbol = symbol_short!("PLG_CTR");
 const ADMIN_KEY: soroban_sdk::Symbol = symbol_short!("ADMIN");
-const PAUSED_KEY: soroban_sdk::Symbol = symbol_short!("PAUSED");
+/// Guardian address — can pause any flag instantly (break-glass).
+const GUARDIAN_KEY: soroban_sdk::Symbol = symbol_short!("GUARDIAN");
+// ── Granular pause flags ───────────────────────────────────────────────────────
+// Pausing `lock` must NOT block `release`, `refund`, or `dispute`.
+// Each flag is stored as Option<u64> — None = not paused, Some(ts) = paused_at.
+const PAUSE_LOCK: soroban_sdk::Symbol = symbol_short!("P_LOCK");
+const PAUSE_RELEASE: soroban_sdk::Symbol = symbol_short!("P_REL");
+const PAUSE_DISPUTE: soroban_sdk::Symbol = symbol_short!("P_DISP");
+/// Maximum duration any flag may remain paused (30 days).
+/// After this window refund/dispute paths auto-enable regardless of admin keys.
+pub const MAX_PAUSE_SECS: u64 = 30 * 24 * 3600;
 const REWARD_TOKEN_KEY: soroban_sdk::Symbol = symbol_short!("RWD_TOK");
 /// Instance-level map: request_id (u64) → payment_id (u64).
 const REQ_IDX: soroban_sdk::Symbol = symbol_short!("REQ_IDX");
@@ -470,6 +483,136 @@ impl PaymentContract {
         Ok(())
     }
 
+    /// Set the guardian address. Admin only.
+    /// The guardian can pause any flag instantly (break-glass) but cannot unpause.
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&GUARDIAN_KEY, &guardian);
+        env.events().publish(
+            (symbol_short!("pause"), symbol_short!("guardian")),
+            guardian,
+        );
+        Ok(())
+    }
+
+    /// Pause a specific operation flag. Guardian or Admin only.
+    /// `flag`: symbol_short!("lock") | symbol_short!("release") | symbol_short!("dispute").
+    /// Pausing "lock" does NOT block refunds or disputes — exit paths remain open.
+    pub fn pause_flag(
+        env: Env,
+        caller: Address,
+        flag: soroban_sdk::Symbol,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        let guardian: Option<Address> = env.storage().instance().get(&GUARDIAN_KEY);
+        if caller != admin && guardian.as_ref() != Some(&caller) {
+            return Err(Error::Unauthorized);
+        }
+        let key = Self::flag_storage_key(&flag)?;
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&key, &now);
+        env.events().publish(
+            (symbol_short!("pause"), symbol_short!("paused")),
+            (flag, now),
+        );
+        Ok(())
+    }
+
+    /// Unpause a specific operation flag. Admin only.
+    /// Unpausing "release" or "dispute" flags requires the timelock to have elapsed
+    /// (flag must have been paused for at least UPGRADE_TIMELOCK_SECS).
+    /// This asymmetry is deliberate: stopping is instant, resuming is deliberate.
+    pub fn unpause_flag(
+        env: Env,
+        admin: Address,
+        flag: soroban_sdk::Symbol,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let key = Self::flag_storage_key(&flag)?;
+        // Funds-critical flags require timelock before unpausing.
+        let is_funds_critical =
+            flag == symbol_short!("release") || flag == symbol_short!("dispute");
+        if is_funds_critical {
+            if let Some(paused_at) = env.storage().instance().get::<_, u64>(&key) {
+                let now = env.ledger().timestamp();
+                if now < paused_at + UPGRADE_TIMELOCK_SECS {
+                    return Err(Error::TimelockNotElapsed);
+                }
+            }
+        }
+        env.storage().instance().remove(&key);
+        env.events().publish(
+            (symbol_short!("pause"), symbol_short!("unpaused")),
+            flag,
+        );
+        Ok(())
+    }
+
+    /// Returns whether a specific flag is currently paused (within safety window).
+    pub fn is_flag_paused(env: Env, flag: soroban_sdk::Symbol) -> bool {
+        let key = match Self::flag_storage_key(&flag) {
+            Ok(k) => k,
+            Err(_) => return false,
+        };
+        Self::flag_is_paused_now(&env, &key)
+    }
+
+    /// Map flag Symbol to its storage key.
+    fn flag_storage_key(flag: &soroban_sdk::Symbol) -> Result<soroban_sdk::Symbol, Error> {
+        if *flag == symbol_short!("lock") {
+            Ok(PAUSE_LOCK)
+        } else if *flag == symbol_short!("release") {
+            Ok(PAUSE_RELEASE)
+        } else if *flag == symbol_short!("dispute") {
+            Ok(PAUSE_DISPUTE)
+        } else {
+            Err(Error::UnknownPauseFlag)
+        }
+    }
+
+    /// Returns true if the flag is paused AND within the MAX_PAUSE_SECS safety window.
+    /// After MAX_PAUSE_SECS the flag auto-enables so users can always exit even if
+    /// admin keys are lost.
+    fn flag_is_paused_now(env: &Env, key: &soroban_sdk::Symbol) -> bool {
+        match env.storage().instance().get::<_, u64>(key) {
+            None => false,
+            Some(paused_at) => {
+                let now = env.ledger().timestamp();
+                now < paused_at + MAX_PAUSE_SECS
+            }
+        }
+    }
+
+    fn require_lock_not_paused(env: &Env) -> Result<(), Error> {
+        if Self::flag_is_paused_now(env, &PAUSE_LOCK) {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn require_release_not_paused(env: &Env) -> Result<(), Error> {
+        if Self::flag_is_paused_now(env, &PAUSE_RELEASE) {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn require_dispute_not_paused(env: &Env) -> Result<(), Error> {
+        if Self::flag_is_paused_now(env, &PAUSE_DISPUTE) {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
+    /// Legacy single-flag pause — pauses the "lock" flag only.
+    /// Refunds and disputes remain callable. Admin or Guardian only.
     pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         let stored: Address = env
@@ -477,13 +620,20 @@ impl PaymentContract {
             .instance()
             .get(&ADMIN_KEY)
             .ok_or(Error::Unauthorized)?;
-        if admin != stored {
+        let guardian: Option<Address> = env.storage().instance().get(&GUARDIAN_KEY);
+        if admin != stored && guardian.as_ref() != Some(&admin) {
             return Err(Error::Unauthorized);
         }
-        env.storage().instance().set(&PAUSED_KEY, &true);
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&PAUSE_LOCK, &now);
+        env.events().publish(
+            (symbol_short!("pause"), symbol_short!("paused")),
+            (symbol_short!("lock"), now),
+        );
         Ok(())
     }
 
+    /// Legacy single-flag unpause — unpauses the "lock" flag. Admin only.
     pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         let stored: Address = env
@@ -494,19 +644,21 @@ impl PaymentContract {
         if admin != stored {
             return Err(Error::Unauthorized);
         }
-        env.storage().instance().set(&PAUSED_KEY, &false);
+        env.storage().instance().remove(&PAUSE_LOCK);
+        env.events().publish(
+            (symbol_short!("pause"), symbol_short!("unpaused")),
+            symbol_short!("lock"),
+        );
         Ok(())
     }
 
+    /// Returns true if the "lock" flag is paused (legacy compat).
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+        Self::flag_is_paused_now(&env, &PAUSE_LOCK)
     }
 
     fn require_not_paused(env: &Env) -> Result<(), Error> {
-        if env.storage().instance().get(&PAUSED_KEY).unwrap_or(false) {
-            return Err(Error::ContractPaused);
-        }
-        Ok(())
+        Self::require_lock_not_paused(env)
     }
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
@@ -688,7 +840,7 @@ impl PaymentContract {
     /// the payment as Released.
     pub fn release_escrow(env: Env, caller: Address, payment_id: u64) -> Result<(), Error> {
         caller.require_auth();
-        Self::require_not_paused(&env)?;
+        Self::require_release_not_paused(&env)?;
         Self::require_admin(&env, &caller)?;
 
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
@@ -724,9 +876,13 @@ impl PaymentContract {
     /// Refund escrowed funds to the payer. Admin only.
     /// Transfers the locked amount from the contract back to the payer and
     /// marks the payment as Refunded.
+    /// NOTE: refund is intentionally NOT gated by the lock flag — users must
+    /// always be able to exit even when new escrows are paused.
     pub fn refund_escrow(env: Env, caller: Address, payment_id: u64) -> Result<(), Error> {
         caller.require_auth();
-        Self::require_not_paused(&env)?;
+        // Refund path is only blocked by the release flag (funds-critical),
+        // and only while within the MAX_PAUSE_SECS safety window.
+        Self::require_release_not_paused(&env)?;
         Self::require_admin(&env, &caller)?;
 
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
@@ -778,7 +934,9 @@ impl PaymentContract {
         reason: DisputeReason,
         case_id: String,
     ) -> Result<(), Error> {
-        Self::require_not_paused(&env)?;
+        // Dispute path is gated by its own flag, NOT the lock flag.
+        // Users must always be able to raise a dispute on locked funds.
+        Self::require_dispute_not_paused(&env)?;
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
         let old_status = payment.status;
         payment.status = PaymentStatus::Disputed;
@@ -802,7 +960,7 @@ impl PaymentContract {
     }
 
     pub fn resolve_dispute(env: Env, payment_id: u64) -> Result<(), Error> {
-        Self::require_not_paused(&env)?;
+        Self::require_dispute_not_paused(&env)?;
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
         if payment.dispute_case_id.is_some() {
             payment.dispute_resolved = true;

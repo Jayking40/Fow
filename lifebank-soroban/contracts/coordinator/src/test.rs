@@ -718,6 +718,151 @@ fn test_coordinator_non_admin_cannot_pause() {
     h.coord.pause(&attacker);
 }
 
+// ── Granular pause flag tests ─────────────────────────────────────────────────
+
+/// Guardian can pause the alloc flag; rollback (exit path) still works.
+#[test]
+fn test_guardian_can_pause_alloc_flag() {
+    let h = setup();
+    let guardian = Address::generate(&h.env);
+    h.coord.set_guardian(&h.admin, &guardian);
+
+    use soroban_sdk::symbol_short;
+    h.coord.pause_flag(&guardian, &symbol_short!("alloc"));
+    assert!(h.coord.is_flag_paused(&symbol_short!("alloc")));
+
+    // New allocations blocked
+    seed_pending_request(&h, 50);
+    let uid = register_unit(&h);
+    let pid = create_locked_payment(&h, 50);
+    let result = h.coord.try_allocate_units(&50u64, &vec![&h.env, uid], &pid, &h.admin);
+    assert!(result.is_err());
+}
+
+/// Only admin can unpause; guardian cannot.
+#[test]
+#[should_panic]
+fn test_guardian_cannot_unpause() {
+    let h = setup();
+    let guardian = Address::generate(&h.env);
+    h.coord.set_guardian(&h.admin, &guardian);
+    use soroban_sdk::symbol_short;
+    h.coord.pause_flag(&guardian, &symbol_short!("alloc"));
+    h.coord.unpause_flag(&guardian, &symbol_short!("alloc"));
+}
+
+/// Pausing alloc does NOT block settle (different flag).
+#[test]
+fn test_alloc_pause_does_not_block_settle() {
+    let h = setup();
+    use soroban_sdk::symbol_short;
+    seed_pending_request(&h, 60);
+    let uid = register_unit(&h);
+    let pid = create_locked_payment(&h, 60);
+    h.coord.allocate_units(&60u64, &vec![&h.env, uid], &pid, &h.admin);
+    h.coord.confirm_delivery(&60u64, &h.admin);
+
+    // Pause alloc — settle must still work
+    h.coord.pause_flag(&h.admin, &symbol_short!("alloc"));
+    h.coord.settle_payment(&60u64, &h.admin);
+    assert_eq!(h.coord.get_workflow(&60u64).status, WorkflowStatus::Settled);
+}
+
+/// Auto-enable: after MAX_PAUSE_SECS the flag is treated as unpaused.
+#[test]
+fn test_auto_enable_after_max_pause_secs() {
+    use crate::MAX_PAUSE_SECS;
+    use soroban_sdk::symbol_short;
+    let h = setup();
+    h.env.ledger().with_mut(|l| l.timestamp = 1_000);
+    h.coord.pause_flag(&h.admin, &symbol_short!("alloc"));
+    assert!(h.coord.is_flag_paused(&symbol_short!("alloc")));
+
+    // Advance past the safety window
+    h.env.ledger().with_mut(|l| l.timestamp = 1_000 + MAX_PAUSE_SECS + 1);
+    assert!(!h.coord.is_flag_paused(&symbol_short!("alloc")));
+
+    // New allocations must succeed after auto-enable
+    seed_pending_request(&h, 70);
+    let uid = register_unit(&h);
+    let pid = create_locked_payment(&h, 70);
+    h.coord.allocate_units(&70u64, &vec![&h.env, uid], &pid, &h.admin);
+    assert_eq!(h.coord.get_workflow(&70u64).status, WorkflowStatus::Allocated);
+}
+
+/// Exit-always property test: under every combination of the 3 pause flags,
+/// rollback (the canonical exit path) remains callable on an Allocated workflow.
+/// This covers all 8 elements of the flag lattice {alloc, dlvr, settl}^2.
+#[test]
+fn test_exit_always_invariant_over_flag_lattice() {
+    use crate::MAX_PAUSE_SECS;
+    use soroban_sdk::symbol_short;
+    let flag_list = [symbol_short!("alloc"), symbol_short!("dlvr"), symbol_short!("settl")];
+
+    for mask in 0u8..8u8 {
+        let h = setup();
+        h.env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+        let req_id = 200u64 + mask as u64;
+        seed_pending_request(&h, req_id);
+        let uid = register_unit(&h);
+        let pid = create_locked_payment(&h, req_id);
+        h.coord.allocate_units(&req_id, &vec![&h.env, uid], &pid, &h.admin);
+
+        // Apply the flag combination for this mask
+        for (i, flag) in flag_list.iter().enumerate() {
+            if mask & (1 << i) != 0 {
+                h.coord.pause_flag(&h.admin, flag);
+            }
+        }
+
+        // Rollback (exit path) must always succeed regardless of flag combination
+        h.coord.rollback(&req_id);
+        assert_eq!(
+            h.coord.get_workflow(&req_id).status,
+            WorkflowStatus::RolledBack,
+            "exit path blocked for flag mask {mask}"
+        );
+        let pay = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&pid);
+        assert_eq!(
+            pay.status,
+            PaymentStatus::Refunded,
+            "payment not refunded for flag mask {mask}"
+        );
+    }
+}
+
+/// Deadline extension: pausing dlvr extends the allocation_deadline by the pause duration.
+#[test]
+fn test_deadline_extended_during_dlvr_pause() {
+    use soroban_sdk::symbol_short;
+    let h = setup();
+    h.env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    seed_pending_request(&h, 80);
+    let uid = register_unit(&h);
+    let pid = create_locked_payment(&h, 80);
+    h.coord.allocate_units(&80u64, &vec![&h.env, uid], &pid, &h.admin);
+    let original_deadline = h.coord.get_workflow(&80u64).allocation_deadline;
+
+    // Pause dlvr at t=1000, unpause at t=2000 (1000s pause)
+    h.coord.pause_flag(&h.admin, &symbol_short!("dlvr"));
+    h.env.ledger().with_mut(|l| l.timestamp = 2_000);
+    h.coord.unpause_flag(&h.admin, &symbol_short!("dlvr"));
+
+    // confirm_delivery should extend the deadline
+    h.coord.confirm_delivery(&80u64, &h.admin);
+    let wf = h.coord.get_workflow(&80u64);
+    // deadline must be >= original + 1000s pause duration
+    assert!(
+        wf.allocation_deadline >= original_deadline + 1_000,
+        "deadline not extended: got {}, expected >= {}",
+        wf.allocation_deadline,
+        original_deadline + 1_000
+    );
+}
+
+
 // ── Temperature excursion → dispute integration tests (issue #477) ────────────
 
 use super::ExcursionSummary;

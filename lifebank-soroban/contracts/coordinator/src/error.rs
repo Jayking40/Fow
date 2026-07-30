@@ -32,6 +32,8 @@ pub enum CoordinatorError {
 
     // Circuit breaker
     ContractPaused = 840,
+    /// The requested pause flag name is not recognised.
+    UnknownPauseFlag = 841,
 
     // Upgrade lifecycle (#31)
     MigrationAlreadyApplied = 850,
