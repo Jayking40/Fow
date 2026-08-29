@@ -1,13 +1,18 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+
+import { Repository } from 'typeorm';
 
 import { SorobanService } from '../blockchain/services/soroban.service';
 import { OrderEntity } from '../orders/entities/order.entity';
 import { OrderStatus } from '../orders/enums/order-status.enum';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 
-export type WorkflowStep = 'allocate' | 'confirm_delivery' | 'settle' | 'rollback';
+export type WorkflowStep =
+  | 'allocate'
+  | 'confirm_delivery'
+  | 'settle'
+  | 'rollback';
 
 @Injectable()
 export class WorkflowOrchestrationService {
@@ -34,8 +39,11 @@ export class WorkflowOrchestrationService {
     paymentId: string;
     callerAddress: string;
   }): Promise<{ jobId: string }> {
-    const order = await this.orderRepo.findOne({ where: { id: params.requestId } });
-    if (!order) throw new BadRequestException(`Order ${params.requestId} not found`);
+    const order = await this.orderRepo.findOne({
+      where: { id: params.requestId },
+    });
+    if (!order)
+      throw new BadRequestException(`Order ${params.requestId} not found`);
     if (order.status !== OrderStatus.PENDING) {
       throw new BadRequestException(
         `Order must be PENDING to allocate units, current status: ${order.status}`,
@@ -54,7 +62,9 @@ export class WorkflowOrchestrationService {
       metadata: { contractId: this.coordinatorContract },
     });
 
-    this.logger.log(`Allocation queued for request ${params.requestId}, job ${jobId}`);
+    this.logger.log(
+      `Allocation queued for request ${params.requestId}, job ${jobId}`,
+    );
     return { jobId };
   }
 
@@ -66,8 +76,11 @@ export class WorkflowOrchestrationService {
     requestId: string;
     callerAddress: string;
   }): Promise<{ jobId: string }> {
-    const order = await this.orderRepo.findOne({ where: { id: params.requestId } });
-    if (!order) throw new BadRequestException(`Order ${params.requestId} not found`);
+    const order = await this.orderRepo.findOne({
+      where: { id: params.requestId },
+    });
+    if (!order)
+      throw new BadRequestException(`Order ${params.requestId} not found`);
     if (
       order.status !== OrderStatus.IN_TRANSIT &&
       order.status !== OrderStatus.DISPATCHED
@@ -84,7 +97,9 @@ export class WorkflowOrchestrationService {
       metadata: { contractId: this.coordinatorContract },
     });
 
-    this.logger.log(`Delivery confirmation queued for request ${params.requestId}, job ${jobId}`);
+    this.logger.log(
+      `Delivery confirmation queued for request ${params.requestId}, job ${jobId}`,
+    );
     return { jobId };
   }
 
@@ -97,8 +112,11 @@ export class WorkflowOrchestrationService {
     requestId: string;
     callerAddress: string;
   }): Promise<{ jobId: string }> {
-    const order = await this.orderRepo.findOne({ where: { id: params.requestId } });
-    if (!order) throw new BadRequestException(`Order ${params.requestId} not found`);
+    const order = await this.orderRepo.findOne({
+      where: { id: params.requestId },
+    });
+    if (!order)
+      throw new BadRequestException(`Order ${params.requestId} not found`);
     if (order.status !== OrderStatus.DELIVERED) {
       throw new BadRequestException(
         `Order must be DELIVERED to settle payment, current: ${order.status}`,
@@ -112,24 +130,37 @@ export class WorkflowOrchestrationService {
       metadata: { contractId: this.coordinatorContract },
     });
 
-    this.logger.log(`Settlement queued for request ${params.requestId}, job ${jobId}`);
+    this.logger.log(
+      `Settlement queued for request ${params.requestId}, job ${jobId}`,
+    );
     return { jobId };
   }
 
   /**
    * Rollback – admin-only. Releases units and refunds payment on-chain.
+   *
+   * The idempotency key is deterministic per logical rollback request
+   * (`rollback:${requestId}`), matching the allocate/confirm/settle steps.
+   * A retried queue job, a double-submitted admin action, or any at-least-once
+   * delivery of the same rollback request therefore collapses to a single
+   * on-chain submission instead of being re-queued against the coordinator
+   * contract. Do NOT embed `Date.now()`/random values here — that defeats the
+   * deduplication layer for the one step where a duplicate refund is most
+   * consequential. If re-attempts after a terminal failure become a real
+   * requirement, thread a persisted attempt counter through as
+   * `rollback:${requestId}:${attempt}` rather than a wall-clock timestamp.
    */
-  async rollback(params: {
-    requestId: string;
-  }): Promise<{ jobId: string }> {
+  async rollback(params: { requestId: string }): Promise<{ jobId: string }> {
     const jobId = await this.soroban.submitTransaction({
       contractMethod: 'rollback',
       args: [params.requestId],
-      idempotencyKey: `rollback:${params.requestId}:${Date.now()}`,
+      idempotencyKey: `rollback:${params.requestId}`,
       metadata: { contractId: this.coordinatorContract },
     });
 
-    this.logger.log(`Rollback queued for request ${params.requestId}, job ${jobId}`);
+    this.logger.log(
+      `Rollback queued for request ${params.requestId}, job ${jobId}`,
+    );
     return { jobId };
   }
 }
