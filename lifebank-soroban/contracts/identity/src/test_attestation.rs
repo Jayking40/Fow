@@ -261,9 +261,9 @@ fn test_grace_period_allows_in_flight_workflow() {
     let subject = Address::generate(&env);
     client.set_issuer_auth(&admin, &issuer, &CredentialType::MedicalFacilityLicense, &true);
 
-    // Set 3-day grace period for MedicalFacilityLicense.
+    // Set and centrally enable a 3-day grace period for MedicalFacilityLicense.
     let grace = 3 * 24 * 3600u64;
-    client.set_grace_policy(&admin, &CredentialType::MedicalFacilityLicense, &grace);
+    client.set_grace_policy(&admin, &CredentialType::MedicalFacilityLicense, &grace, &true);
 
     env.ledger().with_mut(|l| l.timestamp = 1000);
     client.attest(
@@ -277,14 +277,37 @@ fn test_grace_period_allows_in_flight_workflow() {
     // Just past expiry but within grace window.
     env.ledger().with_mut(|l| l.timestamp = 2001);
 
-    // New allocation blocked (allow_grace=false).
+    // New allocation blocks grace by request.
     assert!(!client.is_valid(&subject, &CredentialType::MedicalFacilityLicense, &false));
-    // In-flight workflow allowed (allow_grace=true).
+    // In-flight workflow requests centrally enabled grace.
     assert!(client.is_valid(&subject, &CredentialType::MedicalFacilityLicense, &true));
 
     // Past grace window — both blocked.
     env.ledger().with_mut(|l| l.timestamp = 2000 + grace + 1);
     assert!(!client.is_valid(&subject, &CredentialType::MedicalFacilityLicense, &true));
+}
+
+#[test]
+fn test_central_policy_can_disable_requested_grace() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let client = make_contract(&env, &admin);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let cred = CredentialType::BloodBankAccreditation;
+
+    client.set_issuer_auth(&admin, &issuer, &cred, &true);
+    let grace = 3 * 24 * 3600u64;
+    client.set_grace_policy(&admin, &cred, &grace, &true);
+
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    client.attest(&issuer, &subject, &cred, &2000u64, &evidence_hash(&env));
+    env.ledger().with_mut(|l| l.timestamp = 2001);
+
+    client.set_grace_policy(&admin, &cred, &grace, &false);
+    // Models release_escrow still requesting grace, while identity refuses it.
+    assert!(!client.is_valid(&subject, &cred, &true));
 }
 
 #[test]

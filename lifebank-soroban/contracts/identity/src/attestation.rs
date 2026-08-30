@@ -2,10 +2,21 @@
 //!
 //! Design invariants:
 //! - No PII is stored on-chain; `evidence_hash` commits to off-chain documents.
-//! - `is_valid(subject, cred_type)` is the single predicate other contracts call.
+//! - `is_valid(subject, cred_type, allow_grace)` is the single predicate other contracts call.
 //! - Revoking a verifier cascade-flags (not auto-revokes) their attestations.
 //! - Grace-period semantics: expired != revoked — downstream behavior differs.
 //! - Quorum (M-of-N) is designed and stored; enabled per credential type via config.
+//!
+//! Grace eligibility is centrally stored per credential type and administered
+//! through `set_grace_policy`. The consumer boolean is only a request and is
+//! rejected when central eligibility is disabled (including for legacy policies
+//! without an eligibility record). The current operation policy is:
+//! - `matching::match_request` and `coordinator::allocate_units` do not request
+//!   grace when checking a `MedicalFacilityLicense`, because allocation must
+//!   not begin with an expired license.
+//! - `payments::release_escrow` requests grace for a `BloodBankAccreditation`
+//!   because settlement may complete an in-flight workflow. The identity admin
+//!   can disable that exception centrally without redeploying payments.
 
 use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec};
 
@@ -51,8 +62,7 @@ pub struct Attestation {
 // Grace-period policy per credential type
 // ---------------------------------------------------------------------------
 
-/// Grace period in seconds after `expires_at` during which in-flight
-/// workflows may continue. New allocations are blocked immediately on expiry.
+/// Central grace policy for a credential type.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct GracePolicy {
@@ -157,6 +167,13 @@ fn grace_seconds(env: &Env, cred: CredentialType) -> u64 {
         .get::<DataKey, GracePolicy>(&DataKey::GracePolicy(cred))
         .map(|p| p.grace_seconds)
         .unwrap_or(0)
+}
+
+fn grace_allowed(env: &Env, cred: CredentialType) -> bool {
+    env.storage()
+        .persistent()
+        .get::<DataKey, bool>(&DataKey::GraceEligibility(cred))
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -432,10 +449,12 @@ pub fn flag_rogue_issuer(
 /// `cred_type` that is:
 ///   - not revoked
 ///   - not issuer-flagged
-///   - not expired (ledger time <= expires_at + grace)
+///   - not expired (ledger time <= expires_at + centrally permitted grace)
 ///
-/// Grace-period semantics apply only to in-flight workflow checks (callers
-/// pass `allow_grace = true`); new allocations always use `allow_grace = false`.
+/// `allow_grace` is only a consumer request. The identity administrator must
+/// also enable grace for the credential type; otherwise the request is denied.
+/// The current policy is intentionally asymmetric: allocation paths request
+/// no grace, while escrow release may request grace for an in-flight payment.
 pub fn is_valid(
     env: &Env,
     subject: &Address,
@@ -450,7 +469,11 @@ pub fn is_valid(
         .unwrap_or(Vec::new(env));
 
     let now = env.ledger().timestamp();
-    let grace = if allow_grace { grace_seconds(env, cred) } else { 0 };
+    let grace = if allow_grace && grace_allowed(env, cred) {
+        grace_seconds(env, cred)
+    } else {
+        0
+    };
 
     for i in 0..ids.len() {
         let id = ids.get(i).unwrap();
@@ -503,12 +526,14 @@ pub fn get_attestation(env: &Env, id: u64) -> Option<Attestation> {
     load(env, id)
 }
 
-/// Set grace-period policy for a credential type. Admin only.
+/// Set the centrally enforced grace-period policy for a credential type.
+/// Admin only. Grace is disabled unless `allow_grace` is explicitly enabled.
 pub fn set_grace_policy(
     env: &Env,
     admin: &Address,
     cred: CredentialType,
     grace_seconds_val: u64,
+    allow_grace: bool,
 ) -> Result<(), Error> {
     admin.require_auth();
     if !is_admin(env, admin) {
@@ -520,6 +545,9 @@ pub fn set_grace_policy(
             credential_type: cred,
             grace_seconds: grace_seconds_val,
         });
+    env.storage()
+        .persistent()
+        .set(&DataKey::GraceEligibility(cred), &allow_grace);
     Ok(())
 }
 

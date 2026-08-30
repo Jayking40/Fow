@@ -1,0 +1,33 @@
+Soroban Storage Layout Rules
+=============================
+
+These rules keep contract entrypoints bounded as ledger state grows. A large entrypoint should fail fast on invalid input, not become permanently un-callable after the next growth step.
+
+Rules
+-----
+
+1. Store one persistent entry per domain object, keyed by its stable ID. For example, use Payment(u64) rather than one Map<u64, Payment> entry.
+2. Store enumeration indexes as fixed pages of at most 100 IDs. Store the count in a separate entry. A query reads one requested page and never scans all pages.
+3. Store one-to-one lookups as individual entries keyed by the lookup value. Do not append them to an instance-level map.
+4. Store counters separately from objects and indexes. Counters must not be reconstructed by scanning object storage.
+5. Any status index that supports deletion must store the object position so removal can swap with the last item in bounded work.
+6. Cap every caller-provided Vec, String, and Bytes before reading or writing dependent state. Use a distinct contract error for each input class where practical.
+7. Prefer events plus off-chain projections for dashboard history and analytics. Keep only authorization-critical counters and summaries on-chain.
+
+Review Checklist
+----------------
+
+- [ ] Every aggregate has a bounded entry size.
+- [ ] Every enumeration uses fixed-size pages and a separate count.
+- [ ] Every page query caps page_size and reads one page only.
+- [ ] Every batch validates its length before the first write.
+- [ ] Every mutable index has bounded insert and delete behavior.
+- [ ] Every migration reads legacy aggregates in bounded chunks and is resumable.
+- [ ] New and growth-bomb tests cover the documented maximum state size.
+- [ ] Budget estimates are recorded for each state-mutating and paginated entrypoint.
+- [ ] Dashboard-only history is emitted as events or projected off-chain.
+
+Payments Migration Note
+-----------------------
+
+payments now writes per-request lookup entries and 100-ID payer, payee, and status pages. Existing deployments that contain REQ_IDX, pi, pyi, or si aggregate entries need a resumable schema migration that copies those records into the new keys before switching reads to the paged layout. The migration must process a bounded chunk per invocation and persist its cursor; it must not deserialize a legacy aggregate in one transaction.

@@ -9,7 +9,9 @@ mod types;
 mod test;
 
 pub use error::MatchingError;
-pub use matching::{compatible_donor_types, is_compatible, score_unit, select_units, sort_by_expiration};
+pub use matching::{
+    compatible_donor_types, is_compatible, score_unit, select_units, sort_by_expiration,
+};
 pub use types::{
     BloodComponent, BloodRequest, BloodStatus, BloodType, BloodUnit, DataKey, MatchKind,
     MatchResult, MatchedUnit, RequestStatus, Urgency,
@@ -173,10 +175,7 @@ impl MatchingContract {
     ///    c. Within each tier, applies FIFO (oldest expiration first).
     ///    d. Supports partial matching — returns whatever is available.
     /// 5. Return a `MatchResult` with scores and partial-fulfillment flag.
-    pub fn match_request(
-        env: Env,
-        request_id: u64,
-    ) -> Result<MatchResult, MatchingError> {
+    pub fn match_request(env: Env, request_id: u64) -> Result<MatchResult, MatchingError> {
         Self::require_initialized(&env)?;
         Self::require_not_paused(&env)?;
 
@@ -224,8 +223,7 @@ impl MatchingContract {
             .unwrap();
         let inv_client = InventoryContractClient::new(&env, &inv_addr);
 
-        let compatible_types =
-            compatible_donor_types(&env, request.blood_type);
+        let compatible_types = compatible_donor_types(&env, request.blood_type);
 
         let mut candidates: Vec<BloodUnit> = Vec::new(&env);
         for i in 0..compatible_types.len() {
@@ -350,11 +348,7 @@ impl MatchingContract {
     }
 
     /// Check whether `donor` can donate to `recipient`.
-    pub fn check_compatibility(
-        _env: Env,
-        donor: BloodType,
-        recipient: BloodType,
-    ) -> bool {
+    pub fn check_compatibility(_env: Env, donor: BloodType, recipient: BloodType) -> bool {
         is_compatible(donor, recipient)
     }
 

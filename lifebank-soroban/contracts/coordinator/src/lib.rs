@@ -340,10 +340,8 @@ impl CoordinatorContract {
         env.storage()
             .instance()
             .remove(&DataKey::PauseFlag(flag.clone()));
-        env.events().publish(
-            (symbol_short!("coord"), symbol_short!("unpaused")),
-            flag,
-        );
+        env.events()
+            .publish((symbol_short!("coord"), symbol_short!("unpaused")), flag);
         Ok(())
     }
 
@@ -462,11 +460,7 @@ impl CoordinatorContract {
         {
             let id_client = IdentityContractClient::new(&env, &identity_addr);
             let credentialed = id_client
-                .try_is_valid(
-                    &caller,
-                    &CredentialType::MedicalFacilityLicense,
-                    &false,
-                )
+                .try_is_valid(&caller, &CredentialType::MedicalFacilityLicense, &false)
                 .unwrap_or(Ok(false))
                 .unwrap_or(false);
             if !credentialed {
@@ -975,7 +969,8 @@ impl CoordinatorContract {
         env.storage().instance().remove(&PENDING_UPGRADE_KEY);
         env.events()
             .publish((symbol_short!("upgrade"), symbol_short!("executed")), ());
-        env.deployer().update_current_contract_wasm(pending.new_wasm_hash);
+        env.deployer()
+            .update_current_contract_wasm(pending.new_wasm_hash);
         Ok(())
     }
 

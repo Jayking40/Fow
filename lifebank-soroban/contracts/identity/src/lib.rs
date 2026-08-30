@@ -184,6 +184,7 @@ pub enum DataKey {
     AttestationSubjectIndex(Address, attestation::CredentialType),
     IssuerAuth(Address, attestation::CredentialType),
     GracePolicy(attestation::CredentialType),
+    GraceEligibility(attestation::CredentialType),
     QuorumConfig(attestation::CredentialType),
     QuorumPending(Address, attestation::CredentialType),
     IssuerFlagged(Address),
@@ -976,7 +977,8 @@ impl IdentityContract {
     }
 
     /// The single validity predicate consumed by other contracts.
-    /// `allow_grace = false` for new allocations; `true` for in-flight workflows.
+    /// `allow_grace` requests centrally configured grace; it cannot enable
+    /// grace when the identity administrator has disabled it for `cred`.
     pub fn is_valid(
         env: Env,
         subject: Address,
@@ -1002,15 +1004,17 @@ impl IdentityContract {
         attestation::get_attestation(&env, attestation_id)
     }
 
-    /// Set grace-period policy for a credential type. Admin only.
+    /// Set the centrally enforced grace-period policy for a credential type.
+    /// Admin only. Grace is disabled unless `allow_grace` is explicitly enabled.
     pub fn set_grace_policy(
         env: Env,
         admin: Address,
         cred: CredentialType,
         grace_seconds: u64,
+        allow_grace: bool,
     ) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
-        attestation::set_grace_policy(&env, &admin, cred, grace_seconds)
+        attestation::set_grace_policy(&env, &admin, cred, grace_seconds, allow_grace)
     }
 
     /// Configure M-of-N quorum for a credential type. Admin only.
