@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 
@@ -257,6 +257,35 @@ describe('OutboxService', () => {
       expect(deadLetterRepo.update).toHaveBeenCalledWith(
         'dl-1',
         expect.objectContaining({ status: DeadLetterStatus.REPLAYED }),
+      );
+    });
+
+    it('uses a deterministic dedup key (no timestamp) for the replayed event', async () => {
+      deadLetterRepo.findOne.mockResolvedValue(dl);
+      await service.replayDeadLetter('dl-1');
+      const calls = outboxRepo.create.mock.calls as Array<
+        [{ dedupKey: string }]
+      >;
+      expect(calls[0][0].dedupKey).toBe('replay:dl-1');
+    });
+
+    it('produces the same dedup key across repeated replay attempts', async () => {
+      deadLetterRepo.findOne.mockResolvedValue(dl);
+      await service.replayDeadLetter('dl-1');
+      await service.replayDeadLetter('dl-1');
+      const calls = outboxRepo.create.mock.calls as Array<
+        [{ dedupKey: string }]
+      >;
+      expect(calls[1][0].dedupKey).toBe(calls[0][0].dedupKey);
+    });
+
+    it('rejects replaying a dead-letter that was already replayed', async () => {
+      deadLetterRepo.findOne.mockResolvedValue({
+        ...dl,
+        status: DeadLetterStatus.REPLAYED,
+      });
+      await expect(service.replayDeadLetter('dl-1')).rejects.toThrow(
+        ConflictException,
       );
     });
 
