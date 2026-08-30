@@ -80,6 +80,27 @@ application event is emitted for alerting.
 - **Clear an entry:** once the schema is registered and the event replayed, set
   `resolved = true` on the `raw_unparsed_events` row.
 
+## No orphaned / duplicate modules
+
+A NestJS feature module is only "live" when another module imports it (directly
+or transitively from `AppModule`). A module that ships a full
+`*.module.ts` / `*.service.ts` / `*.entity.ts` / migration set but is imported
+nowhere is dead code — and dangerous when it shadows a live implementation of the
+same concept (a contributor edits the finished-looking dead copy, the change
+silently no-ops). Issue #93 removed one such pair for fee policy.
+
+Conventions:
+
+- Before adding a second module for an existing concept, delete or fold in the
+  first one. Do not leave both.
+- Every migration that creates a table must live in `src/migrations/` (the only
+  path the migration runner and `test/**/migration-chain*.spec.ts` load). A
+  migration parked inside a feature folder never runs.
+- Consolidation is drift-checked in the unit suite: see
+  `src/fee-policy/fee-policy.consolidation.spec.ts` for the pattern — assert the
+  glob for `*<concept>*.module.ts` / `.service.ts` / `.entity.ts` resolves to a
+  single expected path.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
