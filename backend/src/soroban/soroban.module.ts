@@ -7,6 +7,7 @@ import { RedisModule } from '../redis/redis.module';
 import { BlockchainEvent } from './entities/blockchain-event.entity';
 import { BloodUnitTrail } from './entities/blood-unit-trail.entity';
 import { IndexerStateEntity } from './entities/indexer-state.entity';
+import { RawUnparsedEventEntity } from './entities/raw-unparsed-event.entity';
 import { ReconciliationLogEntity } from './entities/reconciliation-log.entity';
 import { SorobanIndexerService } from './soroban-indexer.service';
 import { SorobanService } from './soroban.service';
@@ -19,6 +20,7 @@ import { BlockchainAdminController } from './blockchain-admin.controller';
       BlockchainEvent,
       BloodUnitTrail,
       IndexerStateEntity,
+      RawUnparsedEventEntity,
       ReconciliationLogEntity,
       OrderEntity,
     ]),

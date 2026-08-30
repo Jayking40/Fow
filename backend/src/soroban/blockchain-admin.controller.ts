@@ -43,4 +43,25 @@ export class BlockchainAdminController {
     const data = await this.indexerService.getDiscrepancies(limit ? parseInt(limit, 10) : 50);
     return { data, total: data.length };
   }
+
+  @Get('indexer/quarantine')
+  @RequirePermissions(Permission.MANAGE_SOROBAN)
+  @ApiOperation({
+    summary:
+      'List contract events quarantined because they could not be decoded',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Quarantined events retrieved successfully',
+  })
+  async getQuarantinedEvents(
+    @Query('resolved') resolved?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const data = await this.indexerService.getUnparsedEvents(
+      resolved === 'true',
+      limit ? parseInt(limit, 10) : 50,
+    );
+    return { data, total: data.length };
+  }
 }

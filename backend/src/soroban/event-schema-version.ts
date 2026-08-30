@@ -51,6 +51,161 @@ export function assertSupportedContractEventSchemaVersion(
   return version;
 }
 
+// ── Schema registry ───────────────────────────────────────────────────
+//
+// The registry validates/decodes each contract event topic against the
+// schema versions the backend knows how to process. Events whose topic is
+// unknown, whose schema version is unsupported, or whose payload fails
+// structural validation are reported as *undecodable* rather than throwing,
+// so the caller can quarantine them into `raw_unparsed_events` instead of
+// dropping them or crashing ingestion.
+
+export type ContractEventEnvelope = EventLike & {
+  eventType?: string | null;
+};
+
+export enum ContractEventDecodeFailureReason {
+  MALFORMED_ENVELOPE = 'malformed_envelope',
+  UNREGISTERED_EVENT_TYPE = 'unregistered_event_type',
+  UNSUPPORTED_SCHEMA_VERSION = 'unsupported_schema_version',
+  SCHEMA_VALIDATION_FAILED = 'schema_validation_failed',
+}
+
+export interface ContractEventSchemaEntry {
+  /** Schema versions the backend can decode for this event type. */
+  versions: readonly number[];
+  /** Payload keys that must be present for the event to be considered decodable. */
+  requiredFields?: readonly string[];
+}
+
+/**
+ * Known contract event topics and the schema versions the indexer supports.
+ * Adding a new event type or version here is the single place that opts the
+ * indexer into processing it — anything else is quarantined.
+ */
+export const CONTRACT_EVENT_SCHEMA_REGISTRY: Readonly<
+  Record<string, ContractEventSchemaEntry>
+> = {
+  blood_registered: {
+    versions: SUPPORTED_CONTRACT_EVENT_SCHEMA_VERSIONS,
+    requiredFields: ['unitId'],
+  },
+  custody_transferred: {
+    versions: SUPPORTED_CONTRACT_EVENT_SCHEMA_VERSIONS,
+    requiredFields: ['unitId'],
+  },
+  temperature_logged: {
+    versions: SUPPORTED_CONTRACT_EVENT_SCHEMA_VERSIONS,
+    requiredFields: ['unitId'],
+  },
+  hash_anchored: { versions: SUPPORTED_CONTRACT_EVENT_SCHEMA_VERSIONS },
+  blood_quarantined: { versions: SUPPORTED_CONTRACT_EVENT_SCHEMA_VERSIONS },
+  blood_quarantine_finalized: {
+    versions: SUPPORTED_CONTRACT_EVENT_SCHEMA_VERSIONS,
+  },
+};
+
+export type ContractEventDecodeResult =
+  | {
+      ok: true;
+      eventType: string;
+      version: number;
+      data: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      eventType: string | null;
+      version: number | null;
+      reason: ContractEventDecodeFailureReason;
+      detail: string;
+    };
+
+/** Resolve the event type from an explicit field or the Soroban topic tuple. */
+export function resolveContractEventType(
+  event: ContractEventEnvelope,
+): string | null {
+  if (typeof event.eventType === 'string' && event.eventType.length > 0) {
+    return event.eventType;
+  }
+
+  const topics = event.topics ?? [];
+  // EVENTS.md envelope: ["<domain>", "<event_type>", <schema_version>]
+  const candidate =
+    topics.length >= 2 ? topics[topics.length - 2] : topics[topics.length - 1];
+  return typeof candidate === 'string' && candidate.length > 0
+    ? candidate
+    : null;
+}
+
+/**
+ * Decode a raw contract event against the schema registry.
+ * Never throws — undecodable events return `{ ok: false, reason }`.
+ */
+export function decodeContractEvent(
+  event: ContractEventEnvelope,
+): ContractEventDecodeResult {
+  const eventType = resolveContractEventType(event);
+  if (!eventType) {
+    return {
+      ok: false,
+      eventType: null,
+      version: null,
+      reason: ContractEventDecodeFailureReason.MALFORMED_ENVELOPE,
+      detail: 'Event is missing an eventType and a usable topic tuple',
+    };
+  }
+
+  let version: number;
+  try {
+    version = getContractEventSchemaVersion(event);
+  } catch {
+    return {
+      ok: false,
+      eventType,
+      version: null,
+      reason: ContractEventDecodeFailureReason.UNSUPPORTED_SCHEMA_VERSION,
+      detail: 'Schema version marker could not be parsed',
+    };
+  }
+
+  const entry = CONTRACT_EVENT_SCHEMA_REGISTRY[eventType];
+  if (!entry) {
+    return {
+      ok: false,
+      eventType,
+      version,
+      reason: ContractEventDecodeFailureReason.UNREGISTERED_EVENT_TYPE,
+      detail: `No schema registered for event type '${eventType}'`,
+    };
+  }
+
+  if (!entry.versions.includes(version)) {
+    return {
+      ok: false,
+      eventType,
+      version,
+      reason: ContractEventDecodeFailureReason.UNSUPPORTED_SCHEMA_VERSION,
+      detail: `Schema v${version} is not supported for event type '${eventType}'`,
+    };
+  }
+
+  const data = event.eventData ?? {};
+  const missing = (entry.requiredFields ?? []).filter(
+    (field) => data[field] === undefined || data[field] === null,
+  );
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      eventType,
+      version,
+      reason: ContractEventDecodeFailureReason.SCHEMA_VALIDATION_FAILED,
+      detail: `Missing required payload field(s): ${missing.join(', ')}`,
+    };
+  }
+
+  return { ok: true, eventType, version, data };
+}
+
 function parseTopicVersion(topic: unknown): number | undefined {
   // EVENTS.md envelope (lifebank-soroban contracts, schema catalog v1+):
   // the trailing topic segment is a raw u32, decoded here as a plain number.
