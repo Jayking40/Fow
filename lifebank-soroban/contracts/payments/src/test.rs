@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, Vec};
 
 fn setup() -> (Env, Address) {
     let env = Env::default();
@@ -251,6 +251,62 @@ fn test_get_payments_by_payer_pagination() {
     assert_eq!(page2.items.len(), 1);
 }
 
+#[test]
+fn test_get_payments_by_payer_crosses_fixed_index_page_boundary() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let payer = Address::generate(&env);
+    let payee = Address::generate(&env);
+
+    for request_id in 1u64..=120 {
+        client.create_payment(&request_id, &payer, &payee, &100i128);
+    }
+
+    let first = client.get_payments_by_payer(&payer, &0u32, &100u32);
+    assert_eq!(first.items.len(), 100);
+    assert_eq!(first.total, 120);
+    assert_eq!(first.items.get(0).unwrap().id, 1);
+    assert_eq!(first.items.get(99).unwrap().id, 100);
+
+    let second = client.get_payments_by_payer(&payer, &1u32, &100u32);
+    assert_eq!(second.items.len(), 20);
+    assert_eq!(second.items.get(0).unwrap().id, 101);
+    assert_eq!(second.items.get(19).unwrap().id, 120);
+}
+
+#[test]
+fn test_get_payments_by_payer_small_pages_span_fixed_index_pages() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let payer = Address::generate(&env);
+    let payee = Address::generate(&env);
+
+    for request_id in 1u64..=120 {
+        client.create_payment(&request_id, &payer, &payee, &100i128);
+    }
+
+    let page = client.get_payments_by_payer(&payer, &5u32, &20u32);
+    assert_eq!(page.items.len(), 20);
+    assert_eq!(page.items.get(0).unwrap().id, 101);
+    assert_eq!(page.items.get(19).unwrap().id, 120);
+}
+
+#[test]
+fn test_payment_pagination_caps_requested_page_size() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let payer = Address::generate(&env);
+    let payee = Address::generate(&env);
+
+    for request_id in 1u64..=101 {
+        client.create_payment(&request_id, &payer, &payee, &100i128);
+    }
+
+    let page = client.get_payments_by_payer(&payer, &0u32, &1000u32);
+    assert_eq!(page.items.len(), 100);
+    assert_eq!(page.page_size, 100);
+}
+
 // ── get_payments_by_payee ──────────────────────────────────────────────────────
 
 #[test]
@@ -334,6 +390,30 @@ fn test_get_payments_by_status_pagination() {
 
     let page1 = client.get_payments_by_status(&PaymentStatus::Refunded, &1u32, &3u32);
     assert_eq!(page1.items.len(), 2);
+}
+
+#[test]
+fn test_status_index_removal_and_insertion_cross_page_boundary() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let mut ids: Vec<u64> = Vec::new(&env);
+
+    for request_id in 1u64..=101 {
+        let (id, _, _) = make_payment(&env, &client, request_id, 100);
+        ids.push_back(id);
+    }
+
+    for i in 0..ids.len() {
+        client.update_status(&ids.get(i).unwrap(), &PaymentStatus::Refunded);
+    }
+
+    let refunded_first = client.get_payments_by_status(&PaymentStatus::Refunded, &0u32, &100u32);
+    assert_eq!(refunded_first.items.len(), 100);
+    assert_eq!(refunded_first.total, 101);
+
+    let refunded_second = client.get_payments_by_status(&PaymentStatus::Refunded, &1u32, &100u32);
+    assert_eq!(refunded_second.items.len(), 1);
+    assert_eq!(refunded_second.total, 101);
 }
 
 // ── get_payment_statistics ─────────────────────────────────────────────────────
@@ -459,6 +539,41 @@ fn test_timeline_out_of_range_page_returns_empty() {
     let page = client.get_payment_timeline(&99u32, &20u32);
     assert_eq!(page.items.len(), 0);
     assert_eq!(page.total, 1);
+}
+
+#[test]
+fn test_timeline_reads_only_requested_page() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    for request_id in 1u64..=101 {
+        make_payment(&env, &client, request_id, 100);
+    }
+
+    let page = client.get_payment_timeline(&1u32, &100u32);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items.get(0).unwrap().id, 101);
+    assert_eq!(page.total, 101);
+}
+
+#[test]
+fn test_batch_create_rejects_more_than_maximum_before_writes() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let mut payments: Vec<(u64, Address, Address, i128)> = Vec::new(&env);
+
+    for request_id in 1u64..=101 {
+        payments.push_back((
+            request_id,
+            Address::generate(&env),
+            Address::generate(&env),
+            100,
+        ));
+    }
+
+    let result = client.try_batch_create_payments(&payments);
+    assert_eq!(result, Err(Ok(Error::BatchTooLarge)));
+    assert_eq!(client.get_payment_count(), 0);
 }
 
 // ── update_status ──────────────────────────────────────────────────────────────

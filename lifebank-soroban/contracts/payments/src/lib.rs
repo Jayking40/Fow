@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::token;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, String,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
     Vec,
 };
 
@@ -167,6 +167,8 @@ pub enum Error {
     NoPendingUpgrade = 519,
     /// The upgrade timelock window has not elapsed yet.
     TimelockNotElapsed = 520,
+    /// A batch exceeds the maximum entries accepted in one transaction.
+    BatchTooLarge = 521,
 }
 
 // ── Storage keys ───────────────────────────────────────────────────────────────
@@ -186,8 +188,6 @@ const PAUSE_DISPUTE: soroban_sdk::Symbol = symbol_short!("P_DISP");
 /// After this window refund/dispute paths auto-enable regardless of admin keys.
 pub const MAX_PAUSE_SECS: u64 = 30 * 24 * 3600;
 const REWARD_TOKEN_KEY: soroban_sdk::Symbol = symbol_short!("RWD_TOK");
-/// Instance-level map: request_id (u64) → payment_id (u64).
-const REQ_IDX: soroban_sdk::Symbol = symbol_short!("REQ_IDX");
 /// Instance-level aggregate stats.
 const STATS_KEY: soroban_sdk::Symbol = symbol_short!("STATS");
 /// Instance storage key for the requests contract address (optional).
@@ -198,6 +198,12 @@ const IDENTITY_CONTRACT: soroban_sdk::Symbol = symbol_short!("ID_CTR");
 const DEFAULT_DISPUTE_TIMEOUT_SECS: u64 = 7 * 24 * 3600;
 /// Instance storage key for the dispute timeout override.
 const DISPUTE_TIMEOUT: soroban_sdk::Symbol = symbol_short!("DISP_TO");
+/// Maximum IDs stored in one enumeration index entry.
+pub const INDEX_PAGE_SIZE: u32 = 100;
+/// Maximum payments accepted by one batch call.
+pub const MAX_BATCH_PAYMENTS: u32 = 100;
+/// Maximum records returned by one pagination call.
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 fn payment_key(id: u64) -> (u64, &'static str) {
     (id, "pay")
@@ -207,24 +213,55 @@ fn pledge_key(id: u64) -> (u64, &'static str) {
     (id, "plg")
 }
 
-fn payer_index_key(payer: &Address) -> (Address, &'static str) {
-    (payer.clone(), "pi")
+fn payer_index_page_key(payer: &Address, page: u32) -> (Address, u32, &'static str) {
+    (payer.clone(), page, "pip")
 }
 
-fn payee_index_key(payee: &Address) -> (Address, &'static str) {
-    (payee.clone(), "pyi")
+fn payee_index_page_key(payee: &Address, page: u32) -> (Address, u32, &'static str) {
+    (payee.clone(), page, "pyp")
 }
 
-fn status_index_key(status: PaymentStatus) -> (u32, &'static str) {
-    let code = match status {
-        PaymentStatus::Pending => 0u32,
+fn status_index_page_key(status: PaymentStatus, page: u32) -> (u32, u32, &'static str) {
+    (status_index_code(status), page, "sip")
+}
+
+fn status_index_code(status: PaymentStatus) -> u32 {
+    match status {
+        PaymentStatus::Pending => 0,
         PaymentStatus::Locked => 1,
         PaymentStatus::Released => 2,
         PaymentStatus::Refunded => 3,
         PaymentStatus::Disputed => 4,
         PaymentStatus::Cancelled => 5,
-    };
-    (code, "si")
+    }
+}
+
+fn payer_index_count_key(payer: &Address) -> (Address, &'static str) {
+    (payer.clone(), "pic")
+}
+
+fn payee_index_count_key(payee: &Address) -> (Address, &'static str) {
+    (payee.clone(), "pyc")
+}
+
+fn status_index_count_key(status: PaymentStatus) -> (u32, &'static str) {
+    (status_index_code(status), "sic")
+}
+
+fn status_position_key(payment_id: u64) -> (u64, &'static str) {
+    (payment_id, "spos")
+}
+
+fn request_payment_key(request_id: u64) -> (u64, &'static str) {
+    (request_id, "reqp")
+}
+
+fn normalized_page_size(page_size: u32) -> u32 {
+    if page_size == 0 {
+        20
+    } else {
+        page_size.min(MAX_PAGE_SIZE)
+    }
 }
 
 fn get_counter(env: &Env) -> u64 {
@@ -286,64 +323,100 @@ fn load_vesting(env: &Env, donor: &Address) -> Option<VestingSchedule> {
 // ── Index helpers ──────────────────────────────────────────────────────────────
 
 fn index_by_payer(env: &Env, payer: &Address, id: u64) {
-    let key = payer_index_key(payer);
+    let count_key = payer_index_count_key(payer);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let page_key = payer_index_page_key(payer, count / INDEX_PAGE_SIZE);
     let mut ids: Vec<u64> = env
         .storage()
         .persistent()
-        .get(&key)
+        .get(&page_key)
         .unwrap_or(Vec::new(env));
     ids.push_back(id);
-    env.storage().persistent().set(&key, &ids);
+    env.storage().persistent().set(&page_key, &ids);
+    env.storage().persistent().set(&count_key, &(count + 1));
 }
 
 fn index_by_payee(env: &Env, payee: &Address, id: u64) {
-    let key = payee_index_key(payee);
+    let count_key = payee_index_count_key(payee);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let page_key = payee_index_page_key(payee, count / INDEX_PAGE_SIZE);
     let mut ids: Vec<u64> = env
         .storage()
         .persistent()
-        .get(&key)
+        .get(&page_key)
         .unwrap_or(Vec::new(env));
     ids.push_back(id);
-    env.storage().persistent().set(&key, &ids);
+    env.storage().persistent().set(&page_key, &ids);
+    env.storage().persistent().set(&count_key, &(count + 1));
 }
 
 fn index_by_status(env: &Env, status: PaymentStatus, id: u64) {
-    let key = status_index_key(status);
+    let count_key = status_index_count_key(status);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let page_key = status_index_page_key(status, count / INDEX_PAGE_SIZE);
     let mut ids: Vec<u64> = env
         .storage()
         .persistent()
-        .get(&key)
+        .get(&page_key)
         .unwrap_or(Vec::new(env));
     ids.push_back(id);
-    env.storage().persistent().set(&key, &ids);
+    env.storage().persistent().set(&page_key, &ids);
+    env.storage()
+        .persistent()
+        .set(&status_position_key(id), &(count, status));
+    env.storage().persistent().set(&count_key, &(count + 1));
 }
 
 fn index_by_request(env: &Env, request_id: u64, payment_id: u64) {
-    let mut map: Map<u64, u64> = env
-        .storage()
-        .instance()
-        .get(&REQ_IDX)
-        .unwrap_or(Map::new(env));
-    map.set(request_id, payment_id);
-    env.storage().instance().set(&REQ_IDX, &map);
+    env.storage()
+        .persistent()
+        .set(&request_payment_key(request_id), &payment_id);
 }
 
-/// Remove `id` from the persistent Vec stored under the given status index key.
+/// Remove a status index entry with a bounded swap-with-last operation.
 fn remove_from_status_index(env: &Env, status: PaymentStatus, id: u64) {
-    let key = status_index_key(status);
-    let ids: Vec<u64> = env
+    let (position, stored_status): (u32, PaymentStatus) = env
         .storage()
         .persistent()
-        .get(&key)
-        .unwrap_or(Vec::new(env));
-    let mut new_ids: Vec<u64> = Vec::new(env);
-    for i in 0..ids.len() {
-        let existing = ids.get(i).unwrap();
-        if existing != id {
-            new_ids.push_back(existing);
-        }
+        .get(&status_position_key(id))
+        .unwrap();
+    if stored_status != status {
+        return;
     }
-    env.storage().persistent().set(&key, &new_ids);
+    let count_key = status_index_count_key(status);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    if count == 0 {
+        return;
+    }
+    let last_position = count - 1;
+    let last_page_key = status_index_page_key(status, last_position / INDEX_PAGE_SIZE);
+    let mut last_page: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&last_page_key)
+        .unwrap_or(Vec::new(env));
+    let last_id = last_page.get(last_page.len() - 1).unwrap();
+    if position != last_position {
+        let target_page_key = status_index_page_key(status, position / INDEX_PAGE_SIZE);
+        let mut target_page: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&target_page_key)
+            .unwrap();
+        target_page.set(position % INDEX_PAGE_SIZE, last_id);
+        env.storage().persistent().set(&target_page_key, &target_page);
+        env.storage()
+            .persistent()
+            .set(&status_position_key(last_id), &(position, status));
+    }
+    last_page.pop_back();
+    if last_page.len() == 0 {
+        env.storage().persistent().remove(&last_page_key);
+    } else {
+        env.storage().persistent().set(&last_page_key, &last_page);
+    }
+    env.storage().persistent().set(&count_key, &last_position);
+    env.storage().persistent().remove(&status_position_key(id));
 }
 
 // ── Stats helpers ──────────────────────────────────────────────────────────────
@@ -715,12 +788,11 @@ impl PaymentContract {
         payer.require_auth();
 
         // Reject if a payment for this request already exists.
-        let existing_map: Map<u64, u64> = env
+        if env
             .storage()
-            .instance()
-            .get(&REQ_IDX)
-            .unwrap_or(Map::new(&env));
-        if existing_map.contains_key(request_id) {
+            .persistent()
+            .has(&request_payment_key(request_id))
+        {
             return Err(Error::DuplicatePayment);
         }
 
@@ -772,6 +844,9 @@ impl PaymentContract {
         payments: Vec<(u64, Address, Address, i128)>,
     ) -> Result<Vec<u64>, Error> {
         Self::require_not_paused(&env)?;
+        if payments.len() > MAX_BATCH_PAYMENTS {
+            return Err(Error::BatchTooLarge);
+        }
         let mut ids: Vec<u64> = Vec::new(&env);
         for i in 0..payments.len() {
             let (request_id, payer, payee, amount) = payments.get(i).unwrap();
@@ -801,12 +876,11 @@ impl PaymentContract {
         hospital.require_auth();
 
         // Reject if a payment for this request already exists.
-        let existing_map: Map<u64, u64> = env
+        if env
             .storage()
-            .instance()
-            .get(&REQ_IDX)
-            .unwrap_or(Map::new(&env));
-        if existing_map.contains_key(request_id) {
+            .persistent()
+            .has(&request_payment_key(request_id))
+        {
             return Err(Error::DuplicatePayment);
         }
 
@@ -881,7 +955,7 @@ impl PaymentContract {
             .get::<soroban_sdk::Symbol, Address>(&IDENTITY_CONTRACT)
         {
             let id_client = IdentityContractClient::new(&env, &identity_addr);
-            // allow_grace=true: in-flight workflow — grace policy applies.
+            // Request grace for an in-flight workflow; identity policy decides.
             let credentialed = id_client
                 .try_is_valid(
                     &payment.payee,
@@ -1031,12 +1105,11 @@ impl PaymentContract {
     }
 
     pub fn get_payment_by_request(env: Env, request_id: u64) -> Result<Payment, Error> {
-        let map: Map<u64, u64> = env
+        let payment_id: u64 = env
             .storage()
-            .instance()
-            .get(&REQ_IDX)
-            .unwrap_or(Map::new(&env));
-        let payment_id = map.get(request_id).ok_or(Error::PaymentNotFound)?;
+            .persistent()
+            .get(&request_payment_key(request_id))
+            .ok_or(Error::PaymentNotFound)?;
         load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)
     }
 
@@ -1046,13 +1119,21 @@ impl PaymentContract {
         page: u32,
         page_size: u32,
     ) -> PaymentPage {
-        let page_size = if page_size == 0 { 20 } else { page_size };
+        let page_size = normalized_page_size(page_size);
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get(&payer_index_count_key(&payer))
+            .unwrap_or(0);
+        let start = (page as u64) * (page_size as u64);
+        let index_page = (start / INDEX_PAGE_SIZE as u64) as u32;
+        let offset = (start % INDEX_PAGE_SIZE as u64) as u32;
         let ids: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&payer_index_key(&payer))
+            .get(&payer_index_page_key(&payer, index_page))
             .unwrap_or(Vec::new(&env));
-        Self::load_page(&env, ids, page, page_size)
+        Self::load_page(&env, ids, total as u64, offset, page, page_size)
     }
 
     pub fn get_payments_by_payee(
@@ -1061,13 +1142,21 @@ impl PaymentContract {
         page: u32,
         page_size: u32,
     ) -> PaymentPage {
-        let page_size = if page_size == 0 { 20 } else { page_size };
+        let page_size = normalized_page_size(page_size);
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get(&payee_index_count_key(&payee))
+            .unwrap_or(0);
+        let start = (page as u64) * (page_size as u64);
+        let index_page = (start / INDEX_PAGE_SIZE as u64) as u32;
+        let offset = (start % INDEX_PAGE_SIZE as u64) as u32;
         let ids: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&payee_index_key(&payee))
+            .get(&payee_index_page_key(&payee, index_page))
             .unwrap_or(Vec::new(&env));
-        Self::load_page(&env, ids, page, page_size)
+        Self::load_page(&env, ids, total as u64, offset, page, page_size)
     }
 
     pub fn get_payments_by_status(
@@ -1076,13 +1165,21 @@ impl PaymentContract {
         page: u32,
         page_size: u32,
     ) -> PaymentPage {
-        let page_size = if page_size == 0 { 20 } else { page_size };
+        let page_size = normalized_page_size(page_size);
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get(&status_index_count_key(status))
+            .unwrap_or(0);
+        let start = (page as u64) * (page_size as u64);
+        let index_page = (start / INDEX_PAGE_SIZE as u64) as u32;
+        let offset = (start % INDEX_PAGE_SIZE as u64) as u32;
         let ids: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&status_index_key(status))
+            .get(&status_index_page_key(status, index_page))
             .unwrap_or(Vec::new(&env));
-        Self::load_page(&env, ids, page, page_size)
+        Self::load_page(&env, ids, total as u64, offset, page, page_size)
     }
 
     pub fn get_payment_statistics(env: Env) -> PaymentStats {
@@ -1090,34 +1187,16 @@ impl PaymentContract {
     }
 
     pub fn get_payment_timeline(env: Env, page: u32, page_size: u32) -> PaymentPage {
-        let page_size = if page_size == 0 { 20 } else { page_size };
+        let page_size = normalized_page_size(page_size);
         let total = get_counter(&env);
-
-        let mut all: Vec<Payment> = Vec::new(&env);
-        for id in 1..=total {
-            if let Some(p) = load_payment(&env, id) {
-                all.push_back(p);
-            }
-        }
-
-        let len = all.len();
-        for i in 0..len {
-            for j in 0..len.saturating_sub(i + 1) {
-                let current = all.get(j).unwrap();
-                let next = all.get(j + 1).unwrap();
-                if current.created_at > next.created_at {
-                    all.set(j, next);
-                    all.set(j + 1, current);
-                }
-            }
-        }
-
         let start = (page as u64) * (page_size as u64);
         let end = (start + page_size as u64).min(total);
         let mut items: Vec<Payment> = Vec::new(&env);
         if start < total {
             for i in start..end {
-                items.push_back(all.get(i as u32).unwrap());
+                if let Some(payment) = load_payment(&env, i + 1) {
+                    items.push_back(payment);
+                }
             }
         }
 
@@ -1386,18 +1465,20 @@ impl PaymentContract {
 
     // ── Internal helpers ───────────────────────────────────────────────────────
 
-    fn load_page(env: &Env, ids: Vec<u64>, page: u32, page_size: u32) -> PaymentPage {
-        let total = ids.len() as u64;
-        let start = (page as u64) * (page_size as u64);
+    fn load_page(
+        env: &Env,
+        ids: Vec<u64>,
+        total: u64,
+        offset: u32,
+        page: u32,
+        page_size: u32,
+    ) -> PaymentPage {
         let mut items: Vec<Payment> = Vec::new(env);
 
-        if start < total {
-            let end = (start + page_size as u64).min(total);
-            for i in start..end {
-                let id = ids.get(i as u32).unwrap();
-                if let Some(p) = load_payment(env, id) {
-                    items.push_back(p);
-                }
+        for i in offset..ids.len().min(offset + page_size) {
+            let id = ids.get(i).unwrap();
+            if let Some(p) = load_payment(env, id) {
+                items.push_back(p);
             }
         }
 
