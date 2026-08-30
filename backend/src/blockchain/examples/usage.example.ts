@@ -5,8 +5,17 @@
  * in your NestJS controllers and services.
  */
 
-import { Injectable } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Injectable,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 
+import { AdminGuard } from '../guards/admin.guard';
 import { SorobanService } from '../services/soroban.service';
 import { SorobanTxJob } from '../types/soroban-tx.types';
 
@@ -24,7 +33,11 @@ export class BloodBankService {
     expirationDate: number,
     donorId?: string,
   ): Promise<string> {
-    const idempotencyKey = `blood-reg-${bankId}-${Date.now()}`;
+    // Idempotency keys MUST be deterministic per logical operation so that a
+    // retried job or a double-submitted request collapses to one on-chain call.
+    // Never embed `Date.now()` / random values here — derive the key from the
+    // stable business identifiers of the operation instead.
+    const idempotencyKey = `blood-reg-${bankId}-${donorId ?? 'anon'}-${bloodType}-${expirationDate}`;
 
     const job: SorobanTxJob = {
       contractMethod: 'register_blood',
@@ -50,7 +63,7 @@ export class BloodBankService {
     bloodType: string,
     minQuantity: number,
   ): Promise<string> {
-    const idempotencyKey = `blood-check-${bloodType}-${Date.now()}`;
+    const idempotencyKey = `blood-check-${bloodType}-${minQuantity}`;
 
     const job: SorobanTxJob = {
       contractMethod: 'check_availability',
@@ -75,7 +88,7 @@ export class BloodBankService {
     limit: number = 10,
     offset: number = 0,
   ): Promise<string> {
-    const idempotencyKey = `blood-query-${bloodType}-${limit}-${offset}-${Date.now()}`;
+    const idempotencyKey = `blood-query-${bloodType}-${limit}-${offset}`;
 
     const job: SorobanTxJob = {
       contractMethod: 'query_by_blood_type',
@@ -158,10 +171,6 @@ export class BloodBankService {
 /**
  * Example Controller Usage
  */
-import { Controller, Post, Get, Body, Param, UseGuards } from '@nestjs/common';
-
-import { AdminGuard } from '../guards/admin.guard';
-
 @Controller('blood-bank')
 export class BloodBankController {
   constructor(private bloodBankService: BloodBankService) {}

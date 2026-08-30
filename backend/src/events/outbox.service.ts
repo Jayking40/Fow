@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from 'crypto';
 
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 
 import { EntityManager, LessThan, Repository } from 'typeorm';
@@ -332,8 +337,20 @@ export class OutboxService {
     if (!dl)
       throw new NotFoundException(`Dead-letter '${deadLetterId}' not found`);
 
-    // Re-insert as a fresh PENDING event with a new dedup key to avoid conflict
-    const newDedupKey = `replay:${deadLetterId}:${Date.now()}`;
+    // A dead-letter is a single logical replay intent. Re-running this for an
+    // already-replayed entry would double-enqueue the same event, so reject it
+    // rather than minting a fresh event each call.
+    if (dl.status === DeadLetterStatus.REPLAYED) {
+      throw new ConflictException(
+        `Dead-letter '${deadLetterId}' has already been replayed`,
+      );
+    }
+
+    // Deterministic dedup key per dead-letter: a retried operator action or an
+    // at-least-once delivery of the replay request collapses to one PENDING
+    // event via the unique dedup-key index. Never embed `Date.now()`/random
+    // values here — that defeats the outbox dedup guarantee.
+    const newDedupKey = `replay:${deadLetterId}`;
     const replayed = await this.outboxRepo.save(
       this.outboxRepo.create({
         aggregateId: dl.aggregateId,
