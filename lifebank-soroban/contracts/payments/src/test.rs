@@ -31,6 +31,27 @@ fn deploy_token_with_balance(env: &Env, admin: &Address, recipient: &Address, am
     token_id
 }
 
+/// Test-only: force a payment's status directly via the contract's own
+/// internal storage helpers, bypassing all authorization and token-transfer
+/// semantics. Used only to set up preconditions for tests that exercise
+/// something other than the status-transition logic itself (pagination,
+/// status indexing, aggregate stats). Mirrors the body of the removed
+/// `update_status` entry point — production code deliberately no longer
+/// exposes an unauthenticated status setter (see the state-machine doc
+/// comment on `PaymentStatus` in `lib.rs`).
+fn force_status(env: &Env, cid: &Address, id: u64, status: PaymentStatus) {
+    env.as_contract(cid, || {
+        let mut payment = load_payment(env, id).unwrap();
+        let old_status = payment.status;
+        payment.status = status;
+        payment.updated_at = env.ledger().timestamp();
+        store_payment(env, &payment);
+        remove_from_status_index(env, old_status, id);
+        index_by_status(env, status, id);
+        update_stats_on_transition(env, payment.amount, old_status, status);
+    });
+}
+
 // ── create_payment ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -192,7 +213,7 @@ fn test_terminal_payment_does_not_block_new_active_payment_for_different_request
     let (env, cid) = setup();
     let client = PaymentContractClient::new(&env, &cid);
     let (id1, _, _) = make_payment(&env, &client, 100, 200);
-    client.update_status(&id1, &PaymentStatus::Refunded);
+    force_status(&env, &cid, id1, PaymentStatus::Refunded);
 
     // A payment for a different request must still be accepted.
     let (id2, _, _) = make_payment(&env, &client, 101, 300);
@@ -354,8 +375,8 @@ fn test_get_payments_by_status_filters_correctly() {
     let (id2, _, _) = make_payment(&env, &client, 2, 200);
     make_payment(&env, &client, 3, 300);
 
-    client.update_status(&id1, &PaymentStatus::Locked);
-    client.update_status(&id2, &PaymentStatus::Locked);
+    force_status(&env, &cid, id1, PaymentStatus::Locked);
+    force_status(&env, &cid, id2, PaymentStatus::Locked);
 
     let locked = client.get_payments_by_status(&PaymentStatus::Locked, &0u32, &20u32);
     assert_eq!(locked.items.len(), 2);
@@ -381,7 +402,7 @@ fn test_get_payments_by_status_pagination() {
     let client = PaymentContractClient::new(&env, &cid);
     for i in 1u64..=5 {
         let (id, _, _) = make_payment(&env, &client, i, 100);
-        client.update_status(&id, &PaymentStatus::Refunded);
+        force_status(&env, &cid, id, PaymentStatus::Refunded);
     }
 
     let page0 = client.get_payments_by_status(&PaymentStatus::Refunded, &0u32, &3u32);
@@ -404,7 +425,7 @@ fn test_status_index_removal_and_insertion_cross_page_boundary() {
     }
 
     for i in 0..ids.len() {
-        client.update_status(&ids.get(i).unwrap(), &PaymentStatus::Refunded);
+        force_status(&env, &cid, ids.get(i).unwrap(), PaymentStatus::Refunded);
     }
 
     let refunded_first = client.get_payments_by_status(&PaymentStatus::Refunded, &0u32, &100u32);
@@ -442,10 +463,10 @@ fn test_statistics_counts_and_totals_correctly() {
     let (id4, _, _) = make_payment(&env, &client, 4, 750);
     make_payment(&env, &client, 5, 300); // stays Pending
 
-    client.update_status(&id1, &PaymentStatus::Locked);
-    client.update_status(&id2, &PaymentStatus::Locked);
-    client.update_status(&id3, &PaymentStatus::Released);
-    client.update_status(&id4, &PaymentStatus::Refunded);
+    force_status(&env, &cid, id1, PaymentStatus::Locked);
+    force_status(&env, &cid, id2, PaymentStatus::Locked);
+    force_status(&env, &cid, id3, PaymentStatus::Released);
+    force_status(&env, &cid, id4, PaymentStatus::Refunded);
 
     let stats = client.get_payment_statistics();
     assert_eq!(stats.count_locked, 2);
@@ -464,8 +485,8 @@ fn test_statistics_ignores_pending_cancelled_disputed() {
     let (id2, _, _) = make_payment(&env, &client, 2, 200);
     make_payment(&env, &client, 3, 300); // stays Pending
 
-    client.update_status(&id1, &PaymentStatus::Cancelled);
-    client.update_status(&id2, &PaymentStatus::Disputed);
+    force_status(&env, &cid, id1, PaymentStatus::Cancelled);
+    force_status(&env, &cid, id2, PaymentStatus::Disputed);
 
     let stats = client.get_payment_statistics();
     assert_eq!(stats.count_locked, 0);
@@ -574,31 +595,6 @@ fn test_batch_create_rejects_more_than_maximum_before_writes() {
     let result = client.try_batch_create_payments(&payments);
     assert_eq!(result, Err(Ok(Error::BatchTooLarge)));
     assert_eq!(client.get_payment_count(), 0);
-}
-
-// ── update_status ──────────────────────────────────────────────────────────────
-
-#[test]
-fn test_update_status_changes_payment_status() {
-    let (env, cid) = setup();
-    let client = PaymentContractClient::new(&env, &cid);
-    let (id, _, _) = make_payment(&env, &client, 1, 500);
-
-    client.update_status(&id, &PaymentStatus::Locked);
-    let p = client.get_payment(&id);
-    assert_eq!(p.status, PaymentStatus::Locked);
-
-    client.update_status(&id, &PaymentStatus::Released);
-    let p = client.get_payment(&id);
-    assert_eq!(p.status, PaymentStatus::Released);
-}
-
-#[test]
-fn test_update_status_returns_not_found_for_missing_payment() {
-    let (env, cid) = setup();
-    let client = PaymentContractClient::new(&env, &cid);
-    let result = client.try_update_status(&999u64, &PaymentStatus::Locked);
-    assert!(result.is_err());
 }
 
 // ── donation pledges ───────────────────────────────────────────────────────────
@@ -839,7 +835,7 @@ fn test_process_expired_disputes_refunds_after_timeout() {
     let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
 
     // Record dispute at t=1000; updated_at becomes 1000.
-    client.record_dispute(&pid, &DisputeReason::FailedDelivery,
+    client.record_dispute(&hospital, &pid, &DisputeReason::FailedDelivery,
         &soroban_sdk::String::from_str(&env, "case-1"));
 
     // Set a short timeout of 500s.
@@ -869,7 +865,7 @@ fn test_process_expired_disputes_skips_non_expired() {
 
     env.ledger().with_mut(|l| l.timestamp = 1_000);
     let pid = client.create_escrow(&2u64, &hospital, &payee, &500i128, &token_id);
-    client.record_dispute(&pid, &DisputeReason::Other,
+    client.record_dispute(&hospital, &pid, &DisputeReason::Other,
         &soroban_sdk::String::from_str(&env, "case-2"));
 
     client.set_dispute_timeout(&admin, &5_000u64);
@@ -901,6 +897,322 @@ fn test_process_expired_disputes_skips_non_disputed_payments() {
     ids.push_back(pid);
     let refunded = client.process_expired_disputes(&admin, &ids);
     assert_eq!(refunded.len(), 0);
+}
+
+// ── Coordinator role: authorization for escrow settlement ─────────────────────
+
+#[test]
+fn test_set_coordinator_allows_coordinator_to_release_and_refund() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    let coordinator = Address::generate(&env);
+    client.set_coordinator(&admin, &coordinator);
+    assert_eq!(client.get_coordinator(), Some(coordinator.clone()));
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 2_000);
+    let pid1 = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+    let pid2 = client.create_escrow(&2u64, &hospital, &payee, &1_000i128, &token_id);
+
+    // Coordinator can release without being admin.
+    client.release_escrow(&coordinator, &pid1);
+    assert_eq!(client.get_payment(&pid1).status, PaymentStatus::Released);
+
+    // Coordinator can refund without being admin.
+    client.refund_escrow(&coordinator, &pid2);
+    assert_eq!(client.get_payment(&pid2).status, PaymentStatus::Refunded);
+}
+
+#[test]
+fn test_non_admin_cannot_set_coordinator() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    let attacker = Address::generate(&env);
+    let coordinator = Address::generate(&env);
+    let result = client.try_set_coordinator(&attacker, &coordinator);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_get_coordinator_defaults_to_none() {
+    let (env, cid, _admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    assert_eq!(client.get_coordinator(), None);
+}
+
+// ── Escrow settlement: authorization & real token transfers ────────────────────
+
+#[test]
+fn test_release_escrow_transfers_tokens_to_payee() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    client.release_escrow(&admin, &pid);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&payee), 1_000);
+    assert_eq!(token_client.balance(&cid), 0);
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Released);
+}
+
+#[test]
+fn test_refund_escrow_transfers_tokens_to_payer() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    client.refund_escrow(&admin, &pid);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&hospital), 1_000);
+    assert_eq!(token_client.balance(&cid), 0);
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Refunded);
+}
+
+#[test]
+fn test_release_escrow_rejects_non_admin_non_coordinator() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    let attacker = Address::generate(&env);
+    let result = client.try_release_escrow(&attacker, &pid);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_refund_escrow_rejects_non_admin_non_coordinator() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    let attacker = Address::generate(&env);
+    let result = client.try_refund_escrow(&attacker, &pid);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+// ── Dispute lifecycle: authorization & Locked ⇄ Disputed transitions ──────────
+
+#[test]
+fn test_record_dispute_rejects_unauthorized_caller() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    let stranger = Address::generate(&env);
+    let result = client.try_record_dispute(
+        &stranger,
+        &pid,
+        &DisputeReason::Other,
+        &soroban_sdk::String::from_str(&env, "case-x"),
+    );
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_record_dispute_allows_payer() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    client.record_dispute(
+        &hospital,
+        &pid,
+        &DisputeReason::FailedDelivery,
+        &soroban_sdk::String::from_str(&env, "case-1"),
+    );
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Disputed);
+}
+
+#[test]
+fn test_record_dispute_allows_payee() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    client.record_dispute(
+        &payee,
+        &pid,
+        &DisputeReason::WrongItem,
+        &soroban_sdk::String::from_str(&env, "case-2"),
+    );
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Disputed);
+}
+
+#[test]
+fn test_record_dispute_allows_coordinator() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+    let coordinator = Address::generate(&env);
+    client.set_coordinator(&admin, &coordinator);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    client.record_dispute(
+        &coordinator,
+        &pid,
+        &DisputeReason::TemperatureExcursion,
+        &soroban_sdk::String::from_str(&env, "case-temp"),
+    );
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Disputed);
+}
+
+#[test]
+fn test_record_dispute_rejects_non_locked_payment() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let (pid, payer, _payee) = make_payment(&env, &client, 1, 500);
+    // Payment is Pending — never escrowed, never Locked.
+    let result = client.try_record_dispute(
+        &payer,
+        &pid,
+        &DisputeReason::Other,
+        &soroban_sdk::String::from_str(&env, "case-3"),
+    );
+    assert_eq!(result, Err(Ok(Error::PaymentNotLocked)));
+}
+
+#[test]
+fn test_resolve_dispute_restores_locked_status() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+    client.record_dispute(
+        &hospital,
+        &pid,
+        &DisputeReason::DamagedGoods,
+        &soroban_sdk::String::from_str(&env, "case-4"),
+    );
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Disputed);
+
+    client.resolve_dispute(&admin, &pid);
+
+    let p = client.get_payment(&pid);
+    assert_eq!(p.status, PaymentStatus::Locked);
+    assert!(p.dispute_resolved);
+}
+
+#[test]
+fn test_resolve_dispute_rejects_non_admin_non_coordinator() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+    client.record_dispute(
+        &hospital,
+        &pid,
+        &DisputeReason::LateDelivery,
+        &soroban_sdk::String::from_str(&env, "case-5"),
+    );
+
+    let stranger = Address::generate(&env);
+    let result = client.try_resolve_dispute(&stranger, &pid);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_resolve_dispute_rejects_non_disputed_payment() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+    // Never disputed — still Locked.
+    let result = client.try_resolve_dispute(&admin, &pid);
+    assert_eq!(result, Err(Ok(Error::PaymentNotDisputed)));
+}
+
+/// A disputed escrow reaches Released through a real, authorized path after
+/// resolution — it is never permanently stuck at Disputed.
+#[test]
+fn test_disputed_payment_can_be_released_after_resolution() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    client.record_dispute(
+        &payee,
+        &pid,
+        &DisputeReason::PaymentContested,
+        &soroban_sdk::String::from_str(&env, "case-6"),
+    );
+    client.resolve_dispute(&admin, &pid);
+    client.release_escrow(&admin, &pid);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&payee), 1_000);
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Released);
+}
+
+/// Same, but resolving into a refund instead of a release.
+#[test]
+fn test_disputed_payment_can_be_refunded_after_resolution() {
+    let (env, cid, admin) = setup_with_admin();
+    let client = PaymentContractClient::new(&env, &cid);
+
+    let hospital = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let token_id = deploy_token_with_balance(&env, &admin, &hospital, 1_000);
+    let pid = client.create_escrow(&1u64, &hospital, &payee, &1_000i128, &token_id);
+
+    client.record_dispute(
+        &hospital,
+        &pid,
+        &DisputeReason::TemperatureExcursion,
+        &soroban_sdk::String::from_str(&env, "case-7"),
+    );
+    client.resolve_dispute(&admin, &pid);
+    client.refund_escrow(&admin, &pid);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&hospital), 1_000);
+    assert_eq!(client.get_payment(&pid).status, PaymentStatus::Refunded);
 }
 
 /// VestingCreated and VestingClaimed events are emitted.

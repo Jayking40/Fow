@@ -35,6 +35,9 @@ pub enum CoordinatorError {
 
     // Admin wiring
     InventoryAdminMismatch = 833,
+    /// The payments contract's coordinator role is not wired to this
+    /// coordinator's own address.
+    PaymentCoordinatorMismatch = 834,
 
     // Circuit breaker
     ContractPaused = 840,

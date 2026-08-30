@@ -276,8 +276,18 @@ impl MockInventoryContract {
 #[contracttype]
 enum PayKey {
     Payment(u64),
+    Escrow(u64),
     Counter,
     FailUpdates,
+    Coordinator,
+}
+
+#[contracttype]
+struct MockEscrowInfo {
+    payer: Address,
+    payee: Address,
+    amount: i128,
+    token: Address,
 }
 
 #[contract]
@@ -308,6 +318,34 @@ impl MockPaymentContract {
         id
     }
 
+    /// Seed a payment that also holds real escrowed tokens, so tests can
+    /// assert `release_escrow`/`refund_escrow` move an actual token balance
+    /// instead of only flipping a status label. Payments created via plain
+    /// `create_payment` have no escrow entry; `release_escrow`/`refund_escrow`
+    /// on those skip the transfer (nothing to move) and only update status,
+    /// which is enough for the many workflow-shape tests that don't care
+    /// about money.
+    pub fn seed_escrow(
+        env: Env,
+        request_id: u64,
+        payer: Address,
+        payee: Address,
+        amount: i128,
+        token: Address,
+    ) -> u64 {
+        let id = Self::create_payment(env.clone(), request_id, PaymentStatus::Locked);
+        env.storage().persistent().set(
+            &PayKey::Escrow(id),
+            &MockEscrowInfo {
+                payer,
+                payee,
+                amount,
+                token,
+            },
+        );
+        id
+    }
+
     pub fn get_payment(env: Env, payment_id: u64) -> Payment {
         env.storage()
             .persistent()
@@ -319,7 +357,18 @@ impl MockPaymentContract {
         env.storage().persistent().set(&PayKey::FailUpdates, &true);
     }
 
-    pub fn update_status(env: Env, payment_id: u64, status: PaymentStatus) {
+    pub fn set_coordinator(env: Env, coordinator: Address) {
+        env.storage()
+            .instance()
+            .set(&PayKey::Coordinator, &coordinator);
+    }
+
+    pub fn get_coordinator(env: Env) -> Option<Address> {
+        env.storage().instance().get(&PayKey::Coordinator)
+    }
+
+    fn check_authorized(env: &Env, caller: &Address) {
+        caller.require_auth();
         if env
             .storage()
             .persistent()
@@ -328,13 +377,45 @@ impl MockPaymentContract {
         {
             panic!("forced payment update failure");
         }
+    }
 
+    pub fn release_escrow(env: Env, caller: Address, payment_id: u64) {
+        Self::check_authorized(&env, &caller);
+        if let Some(esc) = env
+            .storage()
+            .persistent()
+            .get::<_, MockEscrowInfo>(&PayKey::Escrow(payment_id))
+        {
+            let token_client = soroban_sdk::token::Client::new(&env, &esc.token);
+            token_client.transfer(&env.current_contract_address(), &esc.payee, &esc.amount);
+        }
         let mut p: Payment = env
             .storage()
             .persistent()
             .get(&PayKey::Payment(payment_id))
             .unwrap();
-        p.status = status;
+        p.status = PaymentStatus::Released;
+        env.storage()
+            .persistent()
+            .set(&PayKey::Payment(payment_id), &p);
+    }
+
+    pub fn refund_escrow(env: Env, caller: Address, payment_id: u64) {
+        Self::check_authorized(&env, &caller);
+        if let Some(esc) = env
+            .storage()
+            .persistent()
+            .get::<_, MockEscrowInfo>(&PayKey::Escrow(payment_id))
+        {
+            let token_client = soroban_sdk::token::Client::new(&env, &esc.token);
+            token_client.transfer(&env.current_contract_address(), &esc.payer, &esc.amount);
+        }
+        let mut p: Payment = env
+            .storage()
+            .persistent()
+            .get(&PayKey::Payment(payment_id))
+            .unwrap();
+        p.status = PaymentStatus::Refunded;
         env.storage()
             .persistent()
             .set(&PayKey::Payment(payment_id), &p);
@@ -342,10 +423,12 @@ impl MockPaymentContract {
 
     pub fn record_dispute(
         env: Env,
+        caller: Address,
         payment_id: u64,
         _reason: super::payment_client::DisputeReason,
         _case_id: String,
     ) {
+        caller.require_auth();
         let mut p: Payment = env
             .storage()
             .persistent()
@@ -392,6 +475,7 @@ fn setup<'a>() -> Harness<'a> {
     let pay_id = env.register(MockPaymentContract, ());
 
     MockInventoryContractClient::new(&env, &inv_id).initialize(&coord_id);
+    MockPaymentContractClient::new(&env, &pay_id).set_coordinator(&coord_id);
 
     env.register_at(
         &coord_id,
@@ -422,6 +506,27 @@ fn register_unit(h: &Harness) -> u64 {
 fn create_locked_payment(h: &Harness, request_id: u64) -> u64 {
     MockPaymentContractClient::new(&h.env, &h.pay_id)
         .create_payment(&request_id, &PaymentStatus::Locked)
+}
+
+fn create_locked_escrow_payment(
+    h: &Harness,
+    request_id: u64,
+    payer: &Address,
+    payee: &Address,
+    amount: i128,
+    token: &Address,
+) -> u64 {
+    MockPaymentContractClient::new(&h.env, &h.pay_id)
+        .seed_escrow(&request_id, payer, payee, &amount, token)
+}
+
+/// Deploy a minimal Soroban token contract and mint `amount` to `recipient`.
+fn deploy_token_with_balance(env: &Env, admin: &Address, recipient: &Address, amount: i128) -> Address {
+    let token = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_id = token.address();
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(env, &token_id);
+    token_admin.mint(recipient, &amount);
+    token_id
 }
 
 fn reservation_deadline(h: &Harness, reservation_id: u64) -> u64 {
@@ -465,6 +570,86 @@ fn test_full_happy_path() {
 
     let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Released);
+}
+
+// ── Real token movement (settle/expire/rollback must move actual funds) ───────
+
+#[test]
+fn test_settle_payment_releases_real_tokens_to_payee() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+
+    let payer = Address::generate(&h.env);
+    let payee = Address::generate(&h.env);
+    let token = deploy_token_with_balance(&h.env, &h.admin, &h.pay_id, 1_000);
+    let payment_id = create_locked_escrow_payment(&h, 1, &payer, &payee, 1_000, &token);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    h.coord.confirm_delivery(&1u64, &h.admin);
+
+    let token_client = soroban_sdk::token::Client::new(&h.env, &token);
+    assert_eq!(token_client.balance(&payee), 0);
+
+    h.coord.settle_payment(&1u64, &h.admin);
+
+    assert_eq!(token_client.balance(&payee), 1_000);
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Released);
+}
+
+#[test]
+fn test_expire_workflow_refunds_real_tokens_to_payer() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+
+    let payer = Address::generate(&h.env);
+    let payee = Address::generate(&h.env);
+    let token = deploy_token_with_balance(&h.env, &h.admin, &h.pay_id, 1_000);
+    let payment_id = create_locked_escrow_payment(&h, 1, &payer, &payee, 1_000, &token);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    let wf = h.coord.get_workflow(&1u64);
+    let deadline = reservation_deadline(&h, wf.reservation_id);
+    h.env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+
+    let token_client = soroban_sdk::token::Client::new(&h.env, &token);
+    assert_eq!(token_client.balance(&payer), 0);
+
+    h.coord.expire_workflow(&1u64);
+
+    assert_eq!(token_client.balance(&payer), 1_000);
+    assert_eq!(token_client.balance(&h.pay_id), 0);
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Refunded);
+}
+
+#[test]
+fn test_rollback_refunds_real_tokens_to_payer() {
+    let h = setup();
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+
+    let payer = Address::generate(&h.env);
+    let payee = Address::generate(&h.env);
+    let token = deploy_token_with_balance(&h.env, &h.admin, &h.pay_id, 1_000);
+    let payment_id = create_locked_escrow_payment(&h, 1, &payer, &payee, 1_000, &token);
+
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+
+    let token_client = soroban_sdk::token::Client::new(&h.env, &token);
+    assert_eq!(token_client.balance(&payer), 0);
+
+    h.coord.rollback(&1u64);
+
+    assert_eq!(token_client.balance(&payer), 1_000);
+    assert_eq!(token_client.balance(&h.pay_id), 0);
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Refunded);
 }
 
 // ── Sequence enforcement ──────────────────────────────────────────────────────
@@ -1206,6 +1391,7 @@ mod upgrade_tests {
         let coord_id = Address::generate(&h.env);
         let inv_id = h.env.register(MockInventoryContract, ());
         MockInventoryContractClient::new(&h.env, &inv_id).initialize(&coord_id);
+        MockPaymentContractClient::new(&h.env, &h.pay_id).set_coordinator(&coord_id);
         h.env.register_at(
             &coord_id,
             CoordinatorContract,
@@ -1253,6 +1439,7 @@ mod upgrade_tests {
         let inv_id = env.register(MockInventoryContract, ());
         let pay_id = env.register(MockPaymentContract, ());
         MockInventoryContractClient::new(&env, &inv_id).initialize(&coord_id);
+        MockPaymentContractClient::new(&env, &pay_id).set_coordinator(&coord_id);
 
         env.register_at(
             &coord_id,
@@ -1292,6 +1479,7 @@ mod upgrade_tests {
         let inv_id = env.register(MockInventoryContract, ());
         let pay_id = env.register(MockPaymentContract, ());
         MockInventoryContractClient::new(&env, &inv_id).initialize(&coord_id);
+        MockPaymentContractClient::new(&env, &pay_id).set_coordinator(&coord_id);
 
         env.register_at(
             &coord_id,

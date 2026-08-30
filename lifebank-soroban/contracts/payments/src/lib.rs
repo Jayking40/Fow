@@ -30,6 +30,25 @@ use identity_client::IdentityContractClient;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
+/// Payment lifecycle state machine — the single documented source of truth
+/// for every status transition in this contract.
+///
+/// ```text
+///  Pending ──(create_escrow deposits token)───────────────► Locked
+///  Locked  ──(release_escrow, admin/coordinator)──────────► Released  (terminal, token → payee)
+///  Locked  ──(refund_escrow, admin/coordinator)───────────► Refunded  (terminal, token → payer)
+///  Locked  ──(record_dispute, payer/payee/admin/coord.)───► Disputed
+///  Disputed──(resolve_dispute, admin/coordinator)─────────► Locked    (actionable again)
+///  Disputed──(process_expired_disputes, timeout elapsed)──► Refunded  (terminal, token → payer)
+/// ```
+///
+/// Invariant: every transition into `Released` or `Refunded` happens in the
+/// same function that performs the matching `token::Client::transfer` — see
+/// `release_escrow`, `refund_escrow`, and `process_expired_disputes`. There
+/// is deliberately no generic status setter: a prior `update_status`
+/// function let any caller flip a payment to any status (including
+/// `Released`/`Refunded`) with no token movement and no auth check, which
+/// could permanently strand escrowed funds. It has been removed.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaymentStatus {
@@ -169,6 +188,8 @@ pub enum Error {
     TimelockNotElapsed = 520,
     /// A batch exceeds the maximum entries accepted in one transaction.
     BatchTooLarge = 521,
+    /// `resolve_dispute` was called on a payment that is not Disputed.
+    PaymentNotDisputed = 522,
 }
 
 // ── Storage keys ───────────────────────────────────────────────────────────────
@@ -178,6 +199,12 @@ const PLEDGE_COUNTER: soroban_sdk::Symbol = symbol_short!("PLG_CTR");
 const ADMIN_KEY: soroban_sdk::Symbol = symbol_short!("ADMIN");
 /// Guardian address — can pause any flag instantly (break-glass).
 const GUARDIAN_KEY: soroban_sdk::Symbol = symbol_short!("GUARDIAN");
+/// Coordinator contract address — additive to ADMIN_KEY, not a replacement.
+/// Authorizes only `release_escrow`, `refund_escrow`, `record_dispute`, and
+/// `resolve_dispute` (workflow settlement), leaving every other admin-gated
+/// entry point (pause, dispute-timeout, vesting, upgrades) controlled solely
+/// by the human/multisig admin even when a coordinator is wired in.
+const COORDINATOR_KEY: soroban_sdk::Symbol = symbol_short!("COORD");
 // ── Granular pause flags ───────────────────────────────────────────────────────
 // Pausing `lock` must NOT block `release`, `refund`, or `dispute`.
 // Each flag is stored as Option<u64> — None = not paused, Some(ts) = paused_at.
@@ -774,6 +801,49 @@ impl PaymentContract {
         Ok(())
     }
 
+    /// Designate the coordinator contract allowed to call `release_escrow`,
+    /// `refund_escrow`, `record_dispute`, and `resolve_dispute` on behalf of
+    /// workflow-driven settlement. Admin only.
+    pub fn set_coordinator(env: Env, admin: Address, coordinator: Address) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&COORDINATOR_KEY, &coordinator);
+        env.events()
+            .publish((symbol_short!("coord"), symbol_short!("set")), coordinator);
+        Ok(())
+    }
+
+    /// The currently wired coordinator contract, if any.
+    pub fn get_coordinator(env: Env) -> Option<Address> {
+        env.storage().instance().get(&COORDINATOR_KEY)
+    }
+
+    /// Caller must be either the admin or the wired coordinator contract.
+    fn require_admin_or_coordinator(env: &Env, caller: &Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        if *caller == admin {
+            return Ok(());
+        }
+        let coordinator: Option<Address> = env.storage().instance().get(&COORDINATOR_KEY);
+        if coordinator.as_ref() == Some(caller) {
+            return Ok(());
+        }
+        Err(Error::Unauthorized)
+    }
+
+    /// Caller must be the payment's payer, its payee, the admin, or the
+    /// wired coordinator (e.g. an automated temperature-breach report).
+    fn require_dispute_recorder(env: &Env, caller: &Address, payment: &Payment) -> Result<(), Error> {
+        if *caller == payment.payer || *caller == payment.payee {
+            return Ok(());
+        }
+        Self::require_admin_or_coordinator(env, caller)
+    }
+
     pub fn create_payment(
         env: Env,
         request_id: u64,
@@ -943,7 +1013,7 @@ impl PaymentContract {
     pub fn release_escrow(env: Env, caller: Address, payment_id: u64) -> Result<(), Error> {
         caller.require_auth();
         Self::require_release_not_paused(&env)?;
-        Self::require_admin(&env, &caller)?;
+        Self::require_admin_or_coordinator(&env, &caller)?;
 
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
 
@@ -1006,7 +1076,7 @@ impl PaymentContract {
         // Refund path is only blocked by the release flag (funds-critical),
         // and only while within the MAX_PAUSE_SECS safety window.
         Self::require_release_not_paused(&env)?;
-        Self::require_admin(&env, &caller)?;
+        Self::require_admin_or_coordinator(&env, &caller)?;
 
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
 
@@ -1038,29 +1108,22 @@ impl PaymentContract {
         Ok(())
     }
 
-    pub fn update_status(env: Env, payment_id: u64, status: PaymentStatus) -> Result<(), Error> {
-        Self::require_not_paused(&env)?;
-        let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
-        let old_status = payment.status;
-        payment.status = status;
-        payment.updated_at = env.ledger().timestamp();
-        store_payment(&env, &payment);
-        remove_from_status_index(&env, old_status, payment_id);
-        index_by_status(&env, status, payment_id);
-        update_stats_on_transition(&env, payment.amount, old_status, status);
-        Ok(())
-    }
-
     pub fn record_dispute(
         env: Env,
+        caller: Address,
         payment_id: u64,
         reason: DisputeReason,
         case_id: String,
     ) -> Result<(), Error> {
+        caller.require_auth();
         // Dispute path is gated by its own flag, NOT the lock flag.
         // Users must always be able to raise a dispute on locked funds.
         Self::require_dispute_not_paused(&env)?;
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
+        if payment.status != PaymentStatus::Locked {
+            return Err(Error::PaymentNotLocked);
+        }
+        Self::require_dispute_recorder(&env, &caller, &payment)?;
         let old_status = payment.status;
         payment.status = PaymentStatus::Disputed;
         payment.dispute_reason_code = Some(dispute_reason_to_code(reason));
@@ -1082,14 +1145,21 @@ impl PaymentContract {
         Ok(())
     }
 
-    pub fn resolve_dispute(env: Env, payment_id: u64) -> Result<(), Error> {
+    pub fn resolve_dispute(env: Env, caller: Address, payment_id: u64) -> Result<(), Error> {
+        caller.require_auth();
         Self::require_dispute_not_paused(&env)?;
+        Self::require_admin_or_coordinator(&env, &caller)?;
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
-        if payment.dispute_case_id.is_some() {
-            payment.dispute_resolved = true;
+        if payment.status != PaymentStatus::Disputed {
+            return Err(Error::PaymentNotDisputed);
         }
+        payment.dispute_resolved = true;
+        payment.status = PaymentStatus::Locked;
         payment.updated_at = env.ledger().timestamp();
         store_payment(&env, &payment);
+        remove_from_status_index(&env, PaymentStatus::Disputed, payment_id);
+        index_by_status(&env, PaymentStatus::Locked, payment_id);
+        update_stats_on_transition(&env, payment.amount, PaymentStatus::Disputed, PaymentStatus::Locked);
         env.events().publish(
             (
                 symbol_short!("payment"),
