@@ -183,7 +183,7 @@ mod inventory_client {
 
 mod payment_client {
     use super::{Payment, PaymentStatus};
-    use soroban_sdk::{contractclient, contracttype, Env, String};
+    use soroban_sdk::{contractclient, contracttype, Address, Env, String};
 
     #[contracttype]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -200,8 +200,10 @@ mod payment_client {
     #[contractclient(name = "PaymentContractClient")]
     pub trait PaymentContractInterface {
         fn get_payment(env: Env, payment_id: u64) -> Payment;
-        fn update_status(env: Env, payment_id: u64, status: PaymentStatus);
-        fn record_dispute(env: Env, payment_id: u64, reason: DisputeReason, case_id: String);
+        fn get_coordinator(env: Env) -> Option<Address>;
+        fn release_escrow(env: Env, caller: Address, payment_id: u64);
+        fn refund_escrow(env: Env, caller: Address, payment_id: u64);
+        fn record_dispute(env: Env, caller: Address, payment_id: u64, reason: DisputeReason, case_id: String);
     }
 }
 
@@ -282,6 +284,10 @@ impl CoordinatorContract {
         if inv_admin != coord_addr {
             panic!("inventory admin must be set to this coordinator contract address");
         }
+        let pay_coordinator = PaymentContractClient::new(&env, &payment_contract).get_coordinator();
+        if pay_coordinator != Some(coord_addr.clone()) {
+            panic!("payments coordinator must be set to this coordinator contract address");
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
@@ -325,6 +331,10 @@ impl CoordinatorContract {
         let inv_admin = InventoryContractClient::new(&env, &inventory_contract).get_admin();
         if inv_admin != coord_addr {
             return Err(CoordinatorError::InventoryAdminMismatch);
+        }
+        let pay_coordinator = PaymentContractClient::new(&env, &payment_contract).get_coordinator();
+        if pay_coordinator != Some(coord_addr.clone()) {
+            return Err(CoordinatorError::PaymentCoordinatorMismatch);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -763,7 +773,7 @@ impl CoordinatorContract {
         }
 
         pay_client
-            .try_update_status(&wf.payment_id, &PaymentStatus::Released)
+            .try_release_escrow(&env.current_contract_address(), &wf.payment_id)
             .map_err(|_| CoordinatorError::PaymentUpdateFailed)?
             .map_err(|_| CoordinatorError::PaymentUpdateFailed)?;
 
@@ -830,7 +840,7 @@ impl CoordinatorContract {
             .unwrap();
         let pay_client = PaymentContractClient::new(&env, &pay_addr);
         pay_client
-            .try_update_status(&wf.payment_id, &PaymentStatus::Refunded)
+            .try_refund_escrow(&env.current_contract_address(), &wf.payment_id)
             .map_err(|_| CoordinatorError::PaymentUpdateFailed)?
             .map_err(|_| CoordinatorError::PaymentUpdateFailed)?;
 
@@ -886,7 +896,7 @@ impl CoordinatorContract {
         let pay_client = PaymentContractClient::new(&env, &pay_addr);
         if let Ok(Ok(payment)) = pay_client.try_get_payment(&wf.payment_id) {
             if payment.status == PaymentStatus::Locked {
-                let _ = pay_client.try_update_status(&wf.payment_id, &PaymentStatus::Refunded);
+                let _ = pay_client.try_refund_escrow(&env.current_contract_address(), &wf.payment_id);
             }
         }
 
@@ -948,6 +958,7 @@ impl CoordinatorContract {
 
         pay_client
             .try_record_dispute(
+                &env.current_contract_address(),
                 &payment_id,
                 &payment_client::DisputeReason::TemperatureExcursion,
                 &case_id,
