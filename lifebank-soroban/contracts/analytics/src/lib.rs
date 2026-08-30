@@ -110,6 +110,9 @@ fn do_analytics_init(
         .instance()
         .set(&DataKey::TotalPaymentsReleased, &0u64);
     env.storage().instance().set(&DataKey::TotalVolume, &0i128);
+    env.storage()
+        .instance()
+        .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
     env.events().publish(
         (
             symbol_short!("anlytcs"),

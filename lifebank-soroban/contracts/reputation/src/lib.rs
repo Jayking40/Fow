@@ -153,6 +153,9 @@ impl ReputationContract {
             panic!("already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
         events::emit_initialized(&env, &admin);
     }
 
@@ -436,6 +439,29 @@ impl ReputationContract {
         CONTRACT_VERSION
     }
 
+    /// Storage schema version currently recorded on-chain (1 when unset).
+    pub fn schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&SCHEMA_VERSION_KEY)
+            .unwrap_or(1)
+    }
+
+    /// Apply version-gated storage migrations after an upgrade. Admin only.
+    /// Refuses to run once storage already sits at `TARGET_SCHEMA_VERSION`,
+    /// so a migration can never be applied twice.
+    pub fn migrate(env: Env) -> Result<u32, Error> {
+        Self::require_admin(&env)?;
+        let current = Self::schema_version(env.clone());
+        if current >= TARGET_SCHEMA_VERSION {
+            return Err(Error::MigrationAlreadyApplied);
+        }
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
+        Ok(TARGET_SCHEMA_VERSION)
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────────────
 
     fn require_admin(env: &Env) -> Result<(), Error> {
@@ -576,3 +602,9 @@ mod events;
 mod test;
 
 pub const CONTRACT_VERSION: u32 = 2;
+
+/// Storage schema version this binary writes. Bump only together with a
+/// version-gated transformation in `migrate`.
+pub const TARGET_SCHEMA_VERSION: u32 = 1;
+
+const SCHEMA_VERSION_KEY: soroban_sdk::Symbol = soroban_sdk::symbol_short!("SCHEMA_V");

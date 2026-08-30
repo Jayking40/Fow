@@ -25,6 +25,9 @@ impl InventoryContract {
             panic!("already initialized");
         }
         storage::set_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
     }
 
     /// Initialize the inventory contract

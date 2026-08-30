@@ -83,6 +83,9 @@ impl MatchingContract {
             .instance()
             .set(&DataKey::RequestsContract, &requests_contract);
         env.storage().instance().set(&DataKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
 
         events::emit_initialized(&env, &admin, &inventory_contract, &requests_contract);
     }

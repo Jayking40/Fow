@@ -599,3 +599,58 @@ mod circuit_breaker_tests {
         client.pause(&attacker);
     }
 }
+
+#[cfg(test)]
+mod upgrade_tests {
+    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+    use crate::{MatchingContract, MatchingContractClient, CONTRACT_VERSION, TARGET_SCHEMA_VERSION};
+
+    fn setup<'a>() -> (Env, MatchingContractClient<'a>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let inventory = Address::generate(&env);
+        let requests = Address::generate(&env);
+        let cid = env.register(MatchingContract, (&admin, &inventory, &requests));
+        let client = MatchingContractClient::new(&env, &cid);
+        (env, client, admin)
+    }
+
+    #[test]
+    fn test_version_returns_contract_version() {
+        let (_env, client, _admin) = setup();
+        assert_eq!(client.version(), CONTRACT_VERSION);
+    }
+
+    #[test]
+    fn test_schema_version_written_at_init() {
+        let (_env, client, _admin) = setup();
+        assert_eq!(client.schema_version(), TARGET_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_non_admin_upgrade_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let inventory = Address::generate(&env);
+        let requests = Address::generate(&env);
+        let cid = env.register(MatchingContract, (&admin, &inventory, &requests));
+        let client = MatchingContractClient::new(&env, &cid);
+
+        // Simulate non-admin by using mock_auths with a different address
+        let attacker = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &cid,
+                fn_name: "upgrade",
+                args: (BytesN::<32>::from_array(&env, &[0u8; 32]),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+        let result = client.try_upgrade(&hash);
+        assert!(result.is_err(), "non-admin must not be able to upgrade");
+    }
+}

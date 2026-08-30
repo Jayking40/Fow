@@ -206,6 +206,9 @@ impl IdentityContract {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::OrgCounter, &0u32);
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
         Self::grant_role(env.clone(), admin.clone(), Role::Admin);
         env.events()
             .publish((symbol_short!("init"), symbol_short!("v1")), admin);
