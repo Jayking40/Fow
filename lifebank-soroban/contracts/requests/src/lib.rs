@@ -50,6 +50,9 @@ impl RequestContract {
         storage::set_metadata(&env, &storage::default_metadata(&env));
         storage::authorize_hospital(&env, &admin);
         storage::set_initialized(&env);
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
         events::emit_initialized(&env, &admin, &inventory_contract);
     }
 

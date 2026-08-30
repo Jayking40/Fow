@@ -560,6 +560,9 @@ impl PaymentContract {
         if let Some(rc) = requests_contract {
             env.storage().instance().set(&REQ_CONTRACT, &rc);
         }
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
     }
 
     /// Legacy initialize — kept for tooling compatibility.

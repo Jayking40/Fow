@@ -207,3 +207,36 @@ fn test_record_donation_fails_when_not_initialized() {
     let result = client.try_record_donation();
     assert_eq!(result, Err(Ok(AnalyticsError::NotInitialized)));
 }
+
+// ── Upgradeability tests (#31) ────────────────────────────────────────────────
+
+#[test]
+fn test_version_returns_contract_version() {
+    let (_, _, client) = setup();
+    assert_eq!(client.version(), super::CONTRACT_VERSION);
+}
+
+#[test]
+fn test_schema_version_written_at_init() {
+    let (_, _, client) = setup();
+    assert_eq!(client.schema_version(), super::TARGET_SCHEMA_VERSION);
+}
+
+#[test]
+fn test_non_admin_upgrade_rejected() {
+    let (env, _, client) = setup();
+    let attacker = Address::generate(&env);
+    let cid = client.address.clone();
+    let hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &cid,
+            fn_name: "upgrade",
+            args: (hash.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_upgrade(&hash);
+    assert!(result.is_err(), "non-admin must not be able to upgrade");
+}

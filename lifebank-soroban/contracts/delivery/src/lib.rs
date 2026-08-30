@@ -103,6 +103,9 @@ fn do_delivery_init(env: &Env, admin: Address, request_contract: Address) {
         &DataKey::ConfirmationWindow,
         &DEFAULT_CONFIRMATION_WINDOW_LEDGERS,
     );
+    env.storage()
+        .instance()
+        .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
 
     events::emit_initialized(env, &admin, &request_contract);
 }

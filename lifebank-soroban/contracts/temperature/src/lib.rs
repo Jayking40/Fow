@@ -34,6 +34,9 @@ impl TemperatureContract {
             panic!("already initialized");
         }
         storage::set_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&SCHEMA_VERSION_KEY, &TARGET_SCHEMA_VERSION);
     }
 
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
