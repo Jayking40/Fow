@@ -31,8 +31,10 @@ pub struct WorkflowRecord {
     pub unit_ids: Vec<u64>,
     pub status: WorkflowStatus,
     pub delivery_confirmed: bool,
-    /// Ledger timestamp after which an allocated workflow can be expired.
-    pub allocation_deadline: u64,
+    /// ID of the inventory contract's `Reservation` record backing this
+    /// allocation — the single source of truth for which units are held and
+    /// until when (via `InventoryContractClient::get_reservation`).
+    pub reservation_id: u64,
 }
 
 /// Summary of a sustained temperature excursion (mirrors temperature contract type).
@@ -55,6 +57,7 @@ pub enum DataKey {
     InventoryContract,
     PaymentContract,
     IdentityContract,
+    MatchingContract,
     Workflow(u64),
     /// Granular pause flags — stored as Option<u64> (paused_at timestamp).
     /// "Paused" is the legacy single bool kept for compat; new code uses PauseFlag.

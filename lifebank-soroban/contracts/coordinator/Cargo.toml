@@ -18,6 +18,7 @@ request-contract  = { path = "../requests" }
 inventory-contract = { path = "../inventory" }
 payment-contract  = { path = "../payments" }
 delivery-contract = { path = "../delivery" }
+matching-contract = { path = "../matching" }
 
 [features]
 # Enables the full upgrade rehearsal test, which swaps in the real compiled

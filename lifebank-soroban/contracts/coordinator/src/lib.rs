@@ -10,6 +10,7 @@
 /// Any step that finds the prerequisite state missing returns an error and makes
 /// no state changes, providing safe rollback semantics within a single transaction.
 mod error;
+mod events;
 mod types;
 
 #[cfg(test)]
@@ -38,10 +39,43 @@ pub enum RequestStatus {
 }
 
 #[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BloodType {
+    APositive,
+    ANegative,
+    BPositive,
+    BNegative,
+    ABPositive,
+    ABNegative,
+    OPositive,
+    ONegative,
+}
+
+/// Returns true if `donor` blood type is compatible with `recipient`.
+/// Mirrors matching::is_compatible — kept inline to avoid a cross-contract
+/// read just for a pure predicate.
+fn is_compatible(donor: BloodType, recipient: BloodType) -> bool {
+    if donor == BloodType::ONegative { return true; }
+    if recipient == BloodType::ABPositive { return true; }
+    use BloodType::*;
+    matches!(
+        (donor, recipient),
+        (OPositive,  OPositive | APositive | BPositive | ABPositive)
+        | (ANegative, ANegative | APositive | ABNegative | ABPositive)
+        | (APositive, APositive | ABPositive)
+        | (BNegative, BNegative | BPositive | ABNegative | ABPositive)
+        | (BPositive, BPositive | ABPositive)
+        | (ABNegative, ABNegative | ABPositive)
+        | (ABPositive, ABPositive)
+    )
+}
+
+#[contracttype]
 #[derive(Clone, Debug)]
 pub struct BloodRequest {
     pub id: u64,
     pub status: RequestStatus,
+    pub blood_type: BloodType,
 }
 
 #[contracttype]
@@ -61,6 +95,20 @@ pub enum BloodStatus {
 pub struct BloodUnit {
     pub id: u64,
     pub status: BloodStatus,
+    pub blood_type: BloodType,
+}
+
+/// Mirrors inventory::Reservation — the sole record of which units a
+/// workflow holds and until when. The coordinator never stores its own
+/// competing deadline; it always reads this back via `get_reservation`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Reservation {
+    pub unit_ids: Vec<u64>,
+    pub requester: Address,
+    pub created_timestamp: u64,
+    pub expiration_timestamp: u64,
+    pub request_id: u64,
 }
 
 #[contracttype]
@@ -95,8 +143,8 @@ mod request_client {
 }
 
 mod inventory_client {
-    use super::{BloodStatus, BloodUnit};
-    use soroban_sdk::{contractclient, Address, Env, String};
+    use super::{BloodStatus, BloodType, BloodUnit, Reservation};
+    use soroban_sdk::{contractclient, Address, Env, String, Vec};
 
     #[contractclient(name = "InventoryContractClient")]
     pub trait InventoryContractInterface {
@@ -115,6 +163,21 @@ mod inventory_client {
             delivery_location: String,
         ) -> BloodUnit;
         fn get_admin(env: Env) -> Address;
+        fn reserve_blood(
+            env: Env,
+            requester: Address,
+            unit_ids: Vec<u64>,
+            request_id: u64,
+            duration_seconds: u64,
+        ) -> u64;
+        fn release_reservation(env: Env, reservation_id: u64);
+        fn get_reservation(env: Env, reservation_id: u64) -> Reservation;
+        fn extend_reservation(
+            env: Env,
+            reservation_id: u64,
+            additional_seconds: u64,
+            authorized_by: Address,
+        ) -> Reservation;
     }
 }
 
@@ -145,6 +208,24 @@ mod payment_client {
 use inventory_client::InventoryContractClient;
 use payment_client::PaymentContractClient;
 use request_client::RequestContractClient;
+
+// Credential type mirrored from identity contract (no cross-crate dep needed).
+// Kept identical to matching-contract's copy of the same mirror.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialType {
+    MedicalFacilityLicense,
+    RiderCertification,
+    BloodBankAccreditation,
+    DonorEligibility,
+    LabAccreditation,
+}
+
+/// Minimal interface to the identity contract for credential gating.
+#[soroban_sdk::contractclient(name = "IdentityContractClient")]
+pub trait IdentityContractInterface {
+    fn is_valid(env: Env, subject: Address, cred: CredentialType, allow_grace: bool) -> bool;
+}
 
 const ALLOCATION_EXPIRY_SECONDS: u64 = 24 * 60 * 60;
 
@@ -190,12 +271,16 @@ impl CoordinatorContract {
         payment_contract: Address,
     ) {
         admin.require_auth();
-        // Constructor must never be callable more than once.  The deployer
-        // guarantees this for the first call; we guard anyway so a mistaken
-        // direct invocation after deploy is an explicit error rather than a
-        // silent state corruption.
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
+        }
+        // Assert that the inventory contract's admin is this coordinator contract,
+        // so update_status calls authorised by inv_admin are actually authorised
+        // by the coordinator itself — not an implicit side-effect of address config.
+        let coord_addr = env.current_contract_address();
+        let inv_admin = InventoryContractClient::new(&env, &inventory_contract).get_admin();
+        if inv_admin != coord_addr {
+            panic!("inventory admin must be set to this coordinator contract address");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -234,6 +319,12 @@ impl CoordinatorContract {
         admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(CoordinatorError::AlreadyInitialized);
+        }
+        // Same admin-wiring assertion as the constructor.
+        let coord_addr = env.current_contract_address();
+        let inv_admin = InventoryContractClient::new(&env, &inventory_contract).get_admin();
+        if inv_admin != coord_addr {
+            return Err(CoordinatorError::InventoryAdminMismatch);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -487,14 +578,15 @@ impl CoordinatorContract {
             return Err(CoordinatorError::InvalidRequestState);
         }
 
-        // Reserve each inventory unit
+        // Validate every unit is Available and compatible with the request's
+        // blood type before reserving anything — reserve_blood itself has no
+        // notion of blood type, so this check must stay here.
         let inv_addr: Address = env
             .storage()
             .instance()
             .get(&DataKey::InventoryContract)
             .unwrap();
         let inv_client = InventoryContractClient::new(&env, &inv_addr);
-        let inv_admin = inv_client.get_admin();
 
         for i in 0..unit_ids.len() {
             let uid = unit_ids.get(i).unwrap();
@@ -507,11 +599,27 @@ impl CoordinatorContract {
                 return Err(CoordinatorError::UnitNotAvailable);
             }
 
-            inv_client
-                .try_update_status(&uid, &BloodStatus::Reserved, &inv_admin, &None)
-                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?
-                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?;
+            if !is_compatible(unit.blood_type, request.blood_type) {
+                return Err(CoordinatorError::IncompatibleBloodType);
+            }
         }
+
+        // Reserve the whole batch atomically through inventory's Reservation
+        // record — the single source of truth for "who holds these units and
+        // until when." The coordinator's own contract address is both the
+        // inventory admin (asserted at init) and, by that same equality, an
+        // authorized requester, so this self-authorizes exactly like the
+        // inv_admin passthrough used elsewhere in this contract.
+        let coord_addr = env.current_contract_address();
+        let reservation_id = inv_client
+            .try_reserve_blood(
+                &coord_addr,
+                &unit_ids,
+                &request_id,
+                &ALLOCATION_EXPIRY_SECONDS,
+            )
+            .map_err(|_| CoordinatorError::InventoryUpdateFailed)?
+            .map_err(|_| CoordinatorError::InventoryUpdateFailed)?;
 
         env.events().publish(
             (
@@ -530,7 +638,7 @@ impl CoordinatorContract {
                 unit_ids,
                 status: WorkflowStatus::Allocated,
                 delivery_confirmed: false,
-                allocation_deadline: env.ledger().timestamp() + ALLOCATION_EXPIRY_SECONDS,
+                reservation_id,
             },
         );
 
@@ -559,15 +667,6 @@ impl CoordinatorContract {
         if wf.status != WorkflowStatus::Allocated {
             return Err(CoordinatorError::InvalidWorkflowState);
         }
-        // Extend deadline by pause duration so users are not penalised.
-        if let Some(paused_at) = env
-            .storage()
-            .instance()
-            .get::<_, u64>(&DataKey::PauseFlag(symbol_short!("dlvr")))
-        {
-            let pause_duration = env.ledger().timestamp().saturating_sub(paused_at);
-            wf.allocation_deadline = wf.allocation_deadline.saturating_add(pause_duration);
-        }
 
         let inv_addr: Address = env
             .storage()
@@ -576,6 +675,23 @@ impl CoordinatorContract {
             .unwrap();
         let inv_client = InventoryContractClient::new(&env, &inv_addr);
         let inv_admin = inv_client.get_admin();
+
+        // Extend the reservation deadline by the pause duration so users are
+        // not penalised — the reservation record in inventory is the sole
+        // place this deadline lives, so extend it there rather than tracking
+        // a second, competing deadline in WorkflowRecord.
+        if let Some(paused_at) = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&DataKey::PauseFlag(symbol_short!("dlvr")))
+        {
+            let pause_duration = env.ledger().timestamp().saturating_sub(paused_at);
+            inv_client
+                .try_extend_reservation(&wf.reservation_id, &pause_duration, &inv_admin)
+                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?
+                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?;
+        }
+
         let location = soroban_sdk::String::from_str(&env, "delivered");
 
         for i in 0..wf.unit_ids.len() {
@@ -686,31 +802,26 @@ impl CoordinatorContract {
             return Err(CoordinatorError::InvalidWorkflowState);
         }
 
-        if env.ledger().timestamp() < wf.allocation_deadline {
-            return Err(CoordinatorError::WorkflowNotExpired);
-        }
-
         let inv_addr: Address = env
             .storage()
             .instance()
             .get(&DataKey::InventoryContract)
             .unwrap();
         let inv_client = InventoryContractClient::new(&env, &inv_addr);
-        let inv_admin = inv_client.get_admin();
-        let reason = String::from_str(&env, "workflow_expired");
 
-        for i in 0..wf.unit_ids.len() {
-            let uid = wf.unit_ids.get(i).unwrap();
-            inv_client
-                .try_update_status(
-                    &uid,
-                    &BloodStatus::Available,
-                    &inv_admin,
-                    &Some(reason.clone()),
-                )
-                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?
-                .map_err(|_| CoordinatorError::InventoryUpdateFailed)?;
+        let reservation = inv_client
+            .try_get_reservation(&wf.reservation_id)
+            .map_err(|_| CoordinatorError::InventoryUpdateFailed)?
+            .map_err(|_| CoordinatorError::InventoryUpdateFailed)?;
+
+        if env.ledger().timestamp() < reservation.expiration_timestamp {
+            return Err(CoordinatorError::WorkflowNotExpired);
         }
+
+        inv_client
+            .try_release_reservation(&wf.reservation_id)
+            .map_err(|_| CoordinatorError::InventoryUpdateFailed)?
+            .map_err(|_| CoordinatorError::InventoryUpdateFailed)?;
 
         let pay_addr: Address = env
             .storage()
@@ -740,10 +851,13 @@ impl CoordinatorContract {
     }
 
     /// Rollback – admin only. Releases units and refunds payment.
+    ///
+    /// Deliberately not gated by any pause flag: rollback is the canonical
+    /// exit path and must remain callable under every pause combination
+    /// (see `pause_flag`'s doc and `test_exit_always_invariant_over_flag_lattice`).
     pub fn rollback(env: Env, request_id: u64) -> Result<(), CoordinatorError> {
         get_admin(&env).require_auth();
         Self::require_initialized(&env)?;
-        Self::require_not_paused(&env)?;
         Self::require_compatible_domain_contracts(&env)?;
 
         let mut wf = load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
@@ -758,12 +872,11 @@ impl CoordinatorContract {
             .get(&DataKey::InventoryContract)
             .unwrap();
         let inv_client = InventoryContractClient::new(&env, &inv_addr);
-        let inv_admin = inv_client.get_admin();
-
-        for i in 0..wf.unit_ids.len() {
-            let uid = wf.unit_ids.get(i).unwrap();
-            let _ = inv_client.try_update_status(&uid, &BloodStatus::Available, &inv_admin, &None);
-        }
+        // Best-effort, same as before: a workflow may have progressed past
+        // Allocated (units no longer Reserved), so release_reservation's
+        // per-unit "only touch Reserved units" guard makes this a safe no-op
+        // for units that already moved on.
+        let _ = inv_client.try_release_reservation(&wf.reservation_id);
 
         let pay_addr: Address = env
             .storage()

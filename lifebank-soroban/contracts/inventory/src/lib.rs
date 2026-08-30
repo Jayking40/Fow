@@ -621,6 +621,40 @@ impl InventoryContract {
         Ok(())
     }
 
+    /// Extend an existing reservation's expiration by `additional_seconds`. Admin only.
+    ///
+    /// Lets a caller (e.g. the coordinator, crediting a pause window) push out
+    /// a reservation's deadline without releasing and re-reserving the units —
+    /// the units are already `Reserved` so re-reserving would fail availability
+    /// validation. This is the sole mutation path for `Reservation.expiration_timestamp`,
+    /// keeping the reservation record the single source of truth for "until when."
+    pub fn extend_reservation(
+        env: Env,
+        reservation_id: u64,
+        additional_seconds: u64,
+        authorized_by: Address,
+    ) -> Result<Reservation, ContractError> {
+        authorized_by.require_auth();
+
+        Self::require_not_paused(&env)?;
+
+        let admin = storage::get_admin(&env);
+        if authorized_by != admin {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let mut reservation = storage::get_reservation(&env, reservation_id)
+            .ok_or(ContractError::ReservationNotFound)?;
+        reservation.expiration_timestamp = reservation
+            .expiration_timestamp
+            .saturating_add(additional_seconds);
+        storage::set_reservation(&env, reservation_id, &reservation);
+
+        events::emit_reservation_extended(&env, reservation_id, reservation.expiration_timestamp);
+
+        Ok(reservation)
+    }
+
     /// Get a reservation by ID.
     pub fn get_reservation(env: Env, reservation_id: u64) -> Result<Reservation, ContractError> {
         storage::get_reservation(&env, reservation_id).ok_or(ContractError::ReservationNotFound)

@@ -267,6 +267,7 @@ dependencies = [
  "delivery-contract",
  "inventory-contract",
  "lifebank-interfaces",
+ "matching-contract",
  "payment-contract",
  "request-contract",
  "soroban-sdk",

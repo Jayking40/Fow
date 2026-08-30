@@ -1698,3 +1698,112 @@ fn test_migrate_double_run_guard() {
         Err(Ok(crate::error::ContractError::MigrationAlreadyApplied))
     );
 }
+
+// ── Reservations ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_reserve_blood_success() {
+    let (env, admin, client, _cid) = create_test_contract();
+    let bank = admin.clone();
+    env.ledger().set_timestamp(1000u64);
+
+    let unit_id = client.register_blood(&bank, &BloodType::APositive, &450u32, &None);
+
+    let reservation_id = client.reserve_blood(&admin, &vec![&env, unit_id], &42u64, &3600u64);
+    assert_eq!(reservation_id, 1);
+
+    let reservation = client.get_reservation(&reservation_id);
+    assert_eq!(reservation.unit_ids, vec![&env, unit_id]);
+    assert_eq!(reservation.requester, admin);
+    assert_eq!(reservation.request_id, 42u64);
+    assert_eq!(reservation.created_timestamp, 1000u64);
+    assert_eq!(reservation.expiration_timestamp, 1000u64 + 3600u64);
+
+    let unit = client.get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Reserved);
+}
+
+#[test]
+fn test_reserve_blood_rejects_unavailable_unit() {
+    let (env, admin, client, _cid) = create_test_contract();
+    let bank = admin.clone();
+    env.ledger().set_timestamp(1000u64);
+
+    let unit_id = client.register_blood(&bank, &BloodType::APositive, &450u32, &None);
+    client.update_status(&unit_id, &BloodStatus::Reserved, &admin, &None);
+
+    let result = client.try_reserve_blood(&admin, &vec![&env, unit_id], &42u64, &3600u64);
+    assert_eq!(
+        result,
+        Err(Ok(crate::error::ContractError::BloodUnitNotAvailable))
+    );
+}
+
+#[test]
+fn test_reserve_blood_unauthorized_requester() {
+    let (env, admin, client, _cid) = create_test_contract();
+    env.ledger().set_timestamp(1000u64);
+    let unit_id = client.register_blood(&admin, &BloodType::APositive, &450u32, &None);
+
+    let not_admin = Address::generate(&env);
+    let result = client.try_reserve_blood(&not_admin, &vec![&env, unit_id], &42u64, &3600u64);
+    assert_eq!(
+        result,
+        Err(Ok(crate::error::ContractError::NotAuthorizedBloodBank))
+    );
+}
+
+#[test]
+fn test_release_reservation_returns_units_available() {
+    let (env, admin, client, _cid) = create_test_contract();
+    env.ledger().set_timestamp(1000u64);
+    let unit_id = client.register_blood(&admin, &BloodType::APositive, &450u32, &None);
+
+    let reservation_id = client.reserve_blood(&admin, &vec![&env, unit_id], &42u64, &3600u64);
+    client.release_reservation(&reservation_id);
+
+    let unit = client.get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Available);
+
+    let result = client.try_get_reservation(&reservation_id);
+    assert_eq!(
+        result,
+        Err(Ok(crate::error::ContractError::ReservationNotFound))
+    );
+}
+
+#[test]
+fn test_extend_reservation_pushes_out_expiration() {
+    let (env, admin, client, _cid) = create_test_contract();
+    env.ledger().set_timestamp(1000u64);
+    let unit_id = client.register_blood(&admin, &BloodType::APositive, &450u32, &None);
+
+    let reservation_id = client.reserve_blood(&admin, &vec![&env, unit_id], &42u64, &3600u64);
+    let extended = client.extend_reservation(&reservation_id, &500u64, &admin);
+
+    assert_eq!(extended.expiration_timestamp, 1000u64 + 3600u64 + 500u64);
+    let reservation = client.get_reservation(&reservation_id);
+    assert_eq!(reservation.expiration_timestamp, 1000u64 + 3600u64 + 500u64);
+}
+
+#[test]
+fn test_extend_reservation_unauthorized() {
+    let (env, admin, client, _cid) = create_test_contract();
+    env.ledger().set_timestamp(1000u64);
+    let unit_id = client.register_blood(&admin, &BloodType::APositive, &450u32, &None);
+    let reservation_id = client.reserve_blood(&admin, &vec![&env, unit_id], &42u64, &3600u64);
+
+    let not_admin = Address::generate(&env);
+    let result = client.try_extend_reservation(&reservation_id, &500u64, &not_admin);
+    assert_eq!(result, Err(Ok(crate::error::ContractError::Unauthorized)));
+}
+
+#[test]
+fn test_extend_reservation_unknown_reservation() {
+    let (_env, admin, client, _cid) = create_test_contract();
+    let result = client.try_extend_reservation(&999u64, &500u64, &admin);
+    assert_eq!(
+        result,
+        Err(Ok(crate::error::ContractError::ReservationNotFound))
+    );
+}
