@@ -618,9 +618,8 @@ pub use storage_lifecycle::{
 
 // Re-export constants for internal use
 pub(crate) use constants::{
-    HEX_HASH_LENGTH, MAX_BATCH_EXPIRY_SIZE, MAX_BATCH_SIZE, MAX_EVENTS_PER_PAGE, MAX_QUANTITY_ML,
-    MAX_REQUEST_ML, MAX_SHELF_LIFE_DAYS, MAX_UNIT_ID_LENGTH, MIN_QUANTITY_ML, MIN_REQUEST_ML,
-    MIN_SHELF_LIFE_DAYS, NOMINATION_EXPIRY_SECONDS, SECONDS_PER_DAY, TRANSFER_EXPIRY_SECONDS,
+    HEX_HASH_LENGTH, MAX_BATCH_SIZE, MAX_EVENTS_PER_PAGE, MAX_REQUEST_ML, MAX_UNIT_ID_LENGTH,
+    MIN_REQUEST_ML, NOMINATION_EXPIRY_SECONDS, TRANSFER_EXPIRY_SECONDS,
 };
 
 /// Pending SuperAdmin nomination entry.
@@ -1908,7 +1907,7 @@ impl HealthChainContract {
 
     /// Query blood units by status
     pub fn query_by_status(env: Env, status: BloodStatus, max_results: u32) -> Vec<BloodUnit> {
-        let mut units: Map<u64, BloodUnit> = env
+        let units: Map<u64, BloodUnit> = env
             .storage()
             .persistent()
             .get(&BLOOD_UNITS)
@@ -1932,7 +1931,7 @@ impl HealthChainContract {
 
     /// Query blood units by hospital
     pub fn query_by_hospital(env: Env, hospital: Address, max_results: u32) -> Vec<BloodUnit> {
-        let mut units: Map<u64, BloodUnit> = env
+        let units: Map<u64, BloodUnit> = env
             .storage()
             .persistent()
             .get(&BLOOD_UNITS)
@@ -3720,7 +3719,7 @@ impl HealthChainContract {
             (symbol_short!("org"), symbol_short!("state")),
             ActorStateChangeEvent {
                 entity_id: org_id.clone(),
-                old_state: LifecycleState::Active,
+                old_state,
                 new_state: LifecycleState::Inactive,
                 changed_by: admin.clone(),
                 reason: Some(reason.clone()),
@@ -4371,13 +4370,15 @@ impl HealthChainContract {
 
     /// Compute a deterministic link hash.
     ///
-    /// Input: index(4B BE) ∥ workflow_id_bytes ∥ prev_hash(32B)
+    /// Input: index(4B BE) ∥ workflow_id XDR ∥ prev_hash(32B)
     ///        ∥ SHA256(from_actor XDR)(32B) ∥ SHA256(to_actor XDR)(32B)
     ///        ∥ handoff_at(8B BE)
     ///
-    /// Addresses are hashed via their XDR encoding (`ToXdr::to_xdr(&env)`)
-    /// which is stable, deterministic, and reproducible off-chain given the
-    /// same bech32 address string.
+    /// `workflow_id` and both addresses are encoded via their XDR form
+    /// (`ToXdr::to_xdr(&env)`), which is stable, deterministic, and
+    /// reproducible off-chain given the same inputs. The XDR of a `String`
+    /// is a 4-byte big-endian length prefix followed by the UTF-8 bytes
+    /// padded to a 4-byte boundary.
     fn compute_link_hash(
         env: &Env,
         index: u32,
@@ -4388,6 +4389,7 @@ impl HealthChainContract {
         handoff_at: u64,
     ) -> BytesN<32> {
         use soroban_sdk::Bytes;
+        use soroban_sdk::xdr::ToXdr;
 
         // Hash each address to get a stable 32-byte digest.
         let from_digest: BytesN<32> = Self::hash_address(env, from_actor);
@@ -4400,8 +4402,8 @@ impl HealthChainContract {
             input.push_back(*b);
         }
 
-        // workflow_id — variable length UTF-8 bytes
-        let wf_bytes = workflow_id.to_bytes();
+        // workflow_id — XDR encoding (length-prefixed UTF-8 bytes)
+        let wf_bytes = workflow_id.clone().to_xdr(env);
         for i in 0..wf_bytes.len() {
             input.push_back(wf_bytes.get(i).unwrap());
         }
