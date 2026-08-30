@@ -1,6 +1,11 @@
 name: Build & Verify Deployment
 name: Build & Verify Deployment
 
+# Canonical contract stack is the `lifebank-soroban/` workspace (ADR-0001).
+# The legacy `healthchain` monolith under `legacy/contracts/` is intentionally
+# excluded from CI — its tests stay runnable locally (`cd legacy/contracts &&
+# cargo test`) only as a port reference.
+
 on:
   push:
     branches: [main, develop]

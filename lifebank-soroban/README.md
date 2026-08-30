@@ -1,22 +1,62 @@
-# Soroban Project
+# lifebank-soroban
 
-## Project Structure
+**The canonical Soroban contract stack for this repository.**
+Per [ADR-0001](../docs/adr/README.md), this modular
+workspace (soroban-sdk 23) is the single source of truth for on-chain logic. The
+former `healthchain` monolith is deprecated and archived under
+[`legacy/contracts/`](../legacy/contracts).
 
-This repository uses the recommended structure for a Soroban project:
+## Structure
 
 ```text
-.
-├── contracts
-│   └── hello_world
-│       ├── src
-│       │   ├── lib.rs
-│       │   └── test.rs
-│       └── Cargo.toml
-├── Cargo.toml
-└── README.md
+lifebank-soroban/
+├── contracts/
+│   ├── interfaces/     # shared event envelope + cross-contract types
+│   ├── coordinator/    # workflow orchestration, pause flags, timelocked upgrades
+│   ├── inventory/      # blood unit registry & status lifecycle
+│   ├── requests/       # blood request lifecycle
+│   ├── matching/       # request ↔ inventory matching
+│   ├── payments/       # escrow, disputes, pledges, vesting
+│   ├── delivery/       # delivery proof & compliance attestation
+│   ├── temperature/    # cold-chain telemetry & excursion reporting
+│   ├── identity/       # organisation verification & attestation
+│   ├── reputation/     # participant reputation
+│   └── analytics/      # aggregate on-chain metrics
+├── deploy/             # per-network deploy topology (*.toml)
+├── deployments/        # per-network deployment lockfiles (contract IDs + WASM hashes)
+├── docs/
+│   ├── upgrades/       # contract upgrade runbook
+│   └── migration/      # monolith → workspace port tracking (ADR-0001)
+└── scripts/            # build, deploy, upgrade, smoke-test
 ```
 
-- New Soroban contracts can be put in `contracts`, each in their own directory. There is already a `hello_world` contract in there to get you started.
-- If you initialized this project with any other example contracts via `--with-example`, those contracts will be in the `contracts` directory as well.
-- Contracts should have their own `Cargo.toml` files that rely on the top-level `Cargo.toml` workspace for their dependencies.
-- Frontend libraries can be added to the top-level directory as well. If you initialized this project with a frontend template via `--frontend-template` you will have those files already included.
+Each contract has its own `Cargo.toml` and relies on the top-level workspace
+`Cargo.toml` for shared dependencies.
+
+## Build
+
+```bash
+cargo test --all                       # unit + property tests
+cargo build --release --target wasm32v1-none
+bash scripts/build-all.sh              # + wasm-opt
+```
+
+## Deploy
+
+```bash
+bash scripts/deploy-testnet.sh
+```
+
+Deployment writes a lockfile to `deployments/<network>.json`; CI
+(`.github/workflows/deploy-verify.yml`) verifies built WASM hashes against it for
+every network with a non-null `deployed_at`.
+
+## Upgrades
+
+All contracts upgrade in place (same contract ID, storage preserved). Payments
+and coordinator require a 48h timelock. See [`docs/upgrades/`](docs/upgrades/).
+
+## Migration from the monolith
+
+The disposition of every monolith capability, invariant test, and fuzz target is
+tracked in [`docs/migration/`](docs/migration/) against ADR-0001.

@@ -1,4 +1,20 @@
-# Health Chain Soroban Smart Contracts
+# Health Chain Soroban Smart Contracts (LEGACY — NOT CANONICAL)
+
+> **Status: deprecated.** Per [ADR-0001](../../docs/adr/README.md)
+> the canonical contract stack is the modular [`lifebank-soroban`](../../lifebank-soroban)
+> workspace (soroban-sdk 23). This monolith (`healthchain`, soroban-sdk 22) is
+> retained here for reference and to keep its protocol-invariant tests and fuzz
+> targets runnable while their equivalents are ported. It is **excluded from CI**
+> and **must not receive new features**. No instance has ever held live state
+> (see the ADR's live-state attestation).
+>
+> Port progress is tracked in
+> [`lifebank-soroban/docs/migration/`](../../lifebank-soroban/docs/migration/).
+>
+> Tests still run locally:
+> ```bash
+> cd legacy/contracts && cargo test
+> ```
 
 Welcome! This is where we build the smart contracts for Health Chain on Stellar using Soroban.
 
