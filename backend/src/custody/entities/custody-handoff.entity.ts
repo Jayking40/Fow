@@ -1,11 +1,17 @@
 import { Entity, Column, Index } from 'typeorm';
+
 import { BaseEntity } from '../../common/entities/base.entity';
-import { CustodyActor, CustodyHandoffStatus } from '../enums/custody.enum';
+import {
+  CustodyActor,
+  CustodyChainStatus,
+  CustodyHandoffStatus,
+} from '../enums/custody.enum';
 
 @Entity('custody_handoffs')
 @Index(['bloodUnitId'])
 @Index(['orderId'])
 @Index(['status'])
+@Index(['chainStatus'])
 export class CustodyHandoffEntity extends BaseEntity {
   @Column({ name: 'blood_unit_id', type: 'varchar' })
   bloodUnitId: string;
@@ -39,6 +45,20 @@ export class CustodyHandoffEntity extends BaseEntity {
 
   @Column({ name: 'contract_event_id', type: 'varchar', nullable: true })
   contractEventId: string | null;
+
+  @Column({
+    name: 'chain_status',
+    type: 'enum',
+    enum: CustodyChainStatus,
+    default: CustodyChainStatus.NOT_SUBMITTED,
+  })
+  chainStatus: CustodyChainStatus;
+
+  @Column({ name: 'chain_error', type: 'varchar', nullable: true })
+  chainError: string | null;
+
+  @Column({ name: 'chain_verified_at', type: 'timestamptz', nullable: true })
+  chainVerifiedAt: Date | null;
 
   @Column({ name: 'confirmed_at', type: 'timestamptz', nullable: true })
   confirmedAt: Date | null;
