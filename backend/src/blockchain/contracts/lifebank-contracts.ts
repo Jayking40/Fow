@@ -32,11 +32,22 @@ export const LIFEBANK_CONTRACT_BOUNDARIES = {
       resolveDispute: 'resolve_dispute',
     },
   },
+  /**
+   * Cold-chain custody. The canonical stack is the `lifebank-soroban` workspace
+   * (ADR-0001). Cold-chain telemetry lives in the workspace `temperature`
+   * contract; the chain-of-custody transfer trail has no workspace contract yet
+   * and is pending a port (see
+   * lifebank-soroban/docs/migration/README.md §1.3). `portPending`
+   * flags that this boundary is not yet fully on the canonical stack.
+   */
   custody: {
-    sourceOfTruth: 'contracts/src/lib.rs',
+    sourceOfTruth: 'lifebank-soroban/contracts/temperature',
+    portPending: true,
     methods: {
-      transferCustody: 'transfer_custody',
       logTemperature: 'log_temperature',
+    },
+    unportedMethods: {
+      transferCustody: 'transfer_custody',
     },
   },
 } as const;
