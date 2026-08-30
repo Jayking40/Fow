@@ -57,6 +57,29 @@ $ npm run test:e2e
 $ npm run test:cov
 ```
 
+## Soroban event indexer — schema registry & quarantine
+
+The Soroban indexer (`src/soroban/soroban-indexer.service.ts`) decodes every
+contract event against the schema registry in
+`src/soroban/event-schema-version.ts` before dispatching it to a handler.
+
+`decodeContractEvent()` never throws. An event whose topic is unregistered,
+whose schema version is unsupported, or whose payload fails structural
+validation is written to the `raw_unparsed_events` table (migration
+`1940000000000-CreateRawUnparsedEventsTable`) instead of being dropped or
+crashing ingestion, a `WARN` is logged, and a `soroban.indexer.event.quarantined`
+application event is emitted for alerting.
+
+### Runbook
+
+- **Inspect quarantined events:** `GET /blockchain/indexer/quarantine`
+  (permission `MANAGE_SOROBAN`); add `?resolved=true` to see cleared entries.
+- **Onboard a new event type / schema version:** add an entry to
+  `CONTRACT_EVENT_SCHEMA_REGISTRY` (and a handler in `processEvent` if the event
+  drives a projection), redeploy, then replay the affected transactions.
+- **Clear an entry:** once the schema is registered and the event replayed, set
+  `resolved = true` on the `raw_unparsed_events` row.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

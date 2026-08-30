@@ -1,16 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { ConfigService } from '@nestjs/config';
 
 import { Repository, DataSource } from 'typeorm';
 
 import { OrderEntity } from '../orders/entities/order.entity';
 
 import { BlockchainEvent } from './entities/blockchain-event.entity';
-import { assertSupportedContractEventSchemaVersion } from './event-schema-version';
+import {
+  ContractEventDecodeResult,
+  decodeContractEvent,
+} from './event-schema-version';
 import { BloodUnitTrail } from './entities/blood-unit-trail.entity';
 import { IndexerStateEntity } from './entities/indexer-state.entity';
+import { RawUnparsedEventEntity } from './entities/raw-unparsed-event.entity';
 import {
   ReconciliationLogEntity,
   ReconciliationLogStatus,
@@ -18,6 +23,10 @@ import {
 import { SorobanService } from './soroban.service';
 
 const PAYMENT_INDEXER_KEY = 'payment-reconciliation';
+const INDEXER_SOURCE = 'soroban-indexer';
+
+/** Emitted when an undecodable event is quarantined into raw_unparsed_events. */
+export const CONTRACT_EVENT_QUARANTINED = 'soroban.indexer.event.quarantined';
 
 interface SorobanPaymentEvent {
   type: 'payment.released' | 'payment.refunded';
@@ -46,6 +55,9 @@ export class SorobanIndexerService {
     private readonly reconciliationLogRepo: Repository<ReconciliationLogEntity>,
     @InjectRepository(OrderEntity)
     private readonly orderRepo: Repository<OrderEntity>,
+    @InjectRepository(RawUnparsedEventEntity)
+    private readonly unparsedEventRepo: Repository<RawUnparsedEventEntity>,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // ── Existing trail indexer ────────────────────────────────────────────
@@ -292,7 +304,16 @@ export class SorobanIndexerService {
   // ── Existing private methods ──────────────────────────────────────────
 
   private async processEvent(event: BlockchainEvent): Promise<void> {
-    const schemaVersion = assertSupportedContractEventSchemaVersion(event);
+    const decoded = decodeContractEvent({
+      eventType: event.eventType,
+      eventData: event.eventData,
+      topics: (event.eventData?.topics as unknown[] | undefined) ?? null,
+    });
+
+    if (!decoded.ok) {
+      await this.quarantineUnparsedEvent(event, decoded);
+      return;
+    }
 
     switch (event.eventType) {
       case 'blood_registered':
@@ -305,10 +326,66 @@ export class SorobanIndexerService {
         await this.handleTemperatureLogged(event);
         break;
       default:
-        this.logger.warn(
-          `Unknown event type: ${event.eventType} (schema v${schemaVersion})`,
+        this.logger.debug(
+          `No handler for decoded event type: ${event.eventType} (schema v${decoded.version})`,
         );
     }
+  }
+
+  /**
+   * Persist an undecodable event into `raw_unparsed_events` and raise an alert
+   * instead of dropping it or letting it crash ingestion. The originating
+   * event is still marked processed by the caller so it is not retried against
+   * a schema that cannot decode it — an operator replays it from quarantine
+   * once the schema registry is extended.
+   */
+  private async quarantineUnparsedEvent(
+    event: BlockchainEvent,
+    decoded: Extract<ContractEventDecodeResult, { ok: false }>,
+  ): Promise<void> {
+    const record = await this.unparsedEventRepo.save(
+      this.unparsedEventRepo.create({
+        source: INDEXER_SOURCE,
+        eventType: decoded.eventType,
+        schemaVersion: decoded.version,
+        reason: decoded.reason,
+        detail: decoded.detail,
+        transactionHash: event.transactionHash ?? null,
+        rawEvent: {
+          id: event.id,
+          eventType: event.eventType,
+          transactionHash: event.transactionHash,
+          eventData: event.eventData,
+          blockchainTimestamp: event.blockchainTimestamp,
+        },
+        resolved: false,
+      }),
+    );
+
+    this.logger.warn(
+      `Quarantined undecodable event ${event.id} (type=${decoded.eventType ?? 'unknown'}, ` +
+        `reason=${decoded.reason}): ${decoded.detail}`,
+    );
+
+    this.eventEmitter.emit(CONTRACT_EVENT_QUARANTINED, {
+      id: record.id,
+      eventType: decoded.eventType,
+      reason: decoded.reason,
+      detail: decoded.detail,
+      transactionHash: event.transactionHash ?? null,
+    });
+  }
+
+  /** Expose quarantined (undecodable) events for the admin endpoint. */
+  async getUnparsedEvents(
+    resolved = false,
+    limit = 50,
+  ): Promise<RawUnparsedEventEntity[]> {
+    return this.unparsedEventRepo.find({
+      where: { resolved },
+      order: { createdAt: 'DESC' },
+      take: limit,
+    });
   }
 
   private async handleBloodRegistered(event: BlockchainEvent): Promise<void> {
