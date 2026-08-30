@@ -105,3 +105,13 @@ pub fn emit_reservation_released(env: &Env, reservation_id: u64) {
         reservation_id,
     );
 }
+
+pub fn emit_reservation_extended(env: &Env, reservation_id: u64, new_expiration_timestamp: u64) {
+    env.events().publish(
+        (
+            Symbol::new(env, "reservation_extended"),
+            symbol_short!("v1"),
+        ),
+        (reservation_id, new_expiration_timestamp),
+    );
+}

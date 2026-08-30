@@ -296,7 +296,7 @@ pub enum DataKey {
 
 /// Reservation record for blood units locked for a specific requester
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Reservation {
     pub unit_ids: Vec<u64>,
     pub requester: Address,

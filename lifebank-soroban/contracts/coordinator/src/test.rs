@@ -13,7 +13,7 @@ use soroban_sdk::{
 };
 
 use super::{
-    BloodRequest, BloodStatus, BloodUnit, CoordinatorContract, CoordinatorContractClient,
+    BloodRequest, BloodStatus, BloodType, BloodUnit, CoordinatorContract, CoordinatorContractClient,
     CoordinatorError, Payment, PaymentStatus, RequestStatus, WorkflowStatus,
 };
 
@@ -35,9 +35,16 @@ impl MockRequestContract {
     }
 
     pub fn seed_request(env: Env, id: u64, status: RequestStatus) {
+        env.storage().persistent().set(
+            &ReqKey::Request(id),
+            &BloodRequest { id, status, blood_type: BloodType::APositive },
+        );
+    }
+
+    pub fn seed_request_with_type(env: Env, id: u64, status: RequestStatus, blood_type: BloodType) {
         env.storage()
             .persistent()
-            .set(&ReqKey::Request(id), &BloodRequest { id, status });
+            .set(&ReqKey::Request(id), &BloodRequest { id, status, blood_type });
     }
 
     pub fn get_request(env: Env, request_id: u64) -> BloodRequest {
@@ -56,6 +63,9 @@ enum InvKey {
     Admin,
     Counter,
     FailUpdateUnit(u64),
+    Reservation(u64),
+    ReservationCounter,
+    FailReleaseReservation(u64),
 }
 
 #[contract]
@@ -76,7 +86,7 @@ impl MockInventoryContract {
         env.storage().instance().get(&InvKey::Admin).unwrap()
     }
 
-    pub fn register_unit(env: Env) -> u64 {
+    pub fn register_unit(env: Env, blood_type: BloodType) -> u64 {
         let id: u64 = env
             .storage()
             .instance()
@@ -89,6 +99,7 @@ impl MockInventoryContract {
             &BloodUnit {
                 id,
                 status: BloodStatus::Available,
+                blood_type,
             },
         );
         id
@@ -148,6 +159,115 @@ impl MockInventoryContract {
             authorized_by,
             Some(delivery_location),
         )
+    }
+
+    /// Force `release_reservation` to panic for a specific reservation, so
+    /// tests can exercise the "cross-contract call fails, no partial state"
+    /// path the way `fail_update_for_unit` does for `update_status`.
+    pub fn fail_release_for_reservation(env: Env, reservation_id: u64) {
+        env.storage()
+            .persistent()
+            .set(&InvKey::FailReleaseReservation(reservation_id), &true);
+    }
+
+    pub fn reserve_blood(
+        env: Env,
+        requester: Address,
+        unit_ids: Vec<u64>,
+        request_id: u64,
+        duration_seconds: u64,
+    ) -> u64 {
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&InvKey::ReservationCounter)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().instance().set(&InvKey::ReservationCounter, &id);
+
+        let now = env.ledger().timestamp();
+        let reservation = super::Reservation {
+            unit_ids: unit_ids.clone(),
+            requester,
+            created_timestamp: now,
+            expiration_timestamp: now + duration_seconds,
+            request_id,
+        };
+        env.storage()
+            .persistent()
+            .set(&InvKey::Reservation(id), &reservation);
+
+        for i in 0..unit_ids.len() {
+            let uid = unit_ids.get(i).unwrap();
+            let mut unit: BloodUnit = env
+                .storage()
+                .persistent()
+                .get(&InvKey::Unit(uid))
+                .unwrap();
+            unit.status = BloodStatus::Reserved;
+            env.storage().persistent().set(&InvKey::Unit(uid), &unit);
+        }
+
+        id
+    }
+
+    pub fn release_reservation(env: Env, reservation_id: u64) {
+        if env
+            .storage()
+            .persistent()
+            .get(&InvKey::FailReleaseReservation(reservation_id))
+            .unwrap_or(false)
+        {
+            panic!("forced release_reservation failure");
+        }
+
+        let reservation: super::Reservation = env
+            .storage()
+            .persistent()
+            .get(&InvKey::Reservation(reservation_id))
+            .unwrap();
+
+        for i in 0..reservation.unit_ids.len() {
+            let uid = reservation.unit_ids.get(i).unwrap();
+            let mut unit: BloodUnit = env
+                .storage()
+                .persistent()
+                .get(&InvKey::Unit(uid))
+                .unwrap();
+            if unit.status == BloodStatus::Reserved {
+                unit.status = BloodStatus::Available;
+                env.storage().persistent().set(&InvKey::Unit(uid), &unit);
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&InvKey::Reservation(reservation_id));
+    }
+
+    pub fn get_reservation(env: Env, reservation_id: u64) -> super::Reservation {
+        env.storage()
+            .persistent()
+            .get(&InvKey::Reservation(reservation_id))
+            .unwrap()
+    }
+
+    pub fn extend_reservation(
+        env: Env,
+        reservation_id: u64,
+        additional_seconds: u64,
+        _authorized_by: Address,
+    ) -> super::Reservation {
+        let mut reservation: super::Reservation = env
+            .storage()
+            .persistent()
+            .get(&InvKey::Reservation(reservation_id))
+            .unwrap();
+        reservation.expiration_timestamp += additional_seconds;
+        env.storage()
+            .persistent()
+            .set(&InvKey::Reservation(reservation_id), &reservation);
+        reservation
     }
 }
 
@@ -249,22 +369,32 @@ struct Harness<'a> {
     pay_id: Address,
 }
 
+/// Registers the four domain mocks plus the coordinator, honoring the
+/// coordinator's admin-wiring invariant: `inventory.get_admin() ==
+/// coordinator_address`.
+///
+/// The coordinator's constructor asserts this equality, but inventory's
+/// admin can only be set once, at inventory's own construction — so the
+/// coordinator's address must be known and given to inventory *before* the
+/// coordinator itself is deployed. `env.register_at` lets a test pre-assign
+/// any address to a not-yet-deployed contract, which resolves the ordering:
+/// generate the coordinator's future address, hand it to inventory as admin,
+/// then deploy the coordinator at that exact address.
 fn setup<'a>() -> Harness<'a> {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
+    let coord_id = Address::generate(&env);
 
     let req_id = env.register(MockRequestContract, ());
     let inv_id = env.register(MockInventoryContract, ());
     let pay_id = env.register(MockPaymentContract, ());
 
-    // Initialize inventory mock with admin (mock has no constructor)
-    let inv = MockInventoryContractClient::new(&env, &inv_id);
-    inv.initialize(&admin);
+    MockInventoryContractClient::new(&env, &inv_id).initialize(&coord_id);
 
-    // Coordinator uses __constructor — pass args at register time
-    let coord_id = env.register(
+    env.register_at(
+        &coord_id,
         CoordinatorContract,
         (&admin, &req_id, &inv_id, &pay_id),
     );
@@ -286,12 +416,18 @@ fn seed_pending_request(h: &Harness, id: u64) {
 }
 
 fn register_unit(h: &Harness) -> u64 {
-    MockInventoryContractClient::new(&h.env, &h.inv_id).register_unit()
+    MockInventoryContractClient::new(&h.env, &h.inv_id).register_unit(&BloodType::APositive)
 }
 
 fn create_locked_payment(h: &Harness, request_id: u64) -> u64 {
     MockPaymentContractClient::new(&h.env, &h.pay_id)
         .create_payment(&request_id, &PaymentStatus::Locked)
+}
+
+fn reservation_deadline(h: &Harness, reservation_id: u64) -> u64 {
+    MockInventoryContractClient::new(&h.env, &h.inv_id)
+        .get_reservation(&reservation_id)
+        .expiration_timestamp
 }
 
 // ── Happy path ────────────────────────────────────────────────────────────────
@@ -389,7 +525,7 @@ fn test_confirm_delivery_is_idempotent_after_delivery() {
     let after = h.coord.get_workflow(&1u64);
     assert_eq!(after.status, before.status);
     assert_eq!(after.delivery_confirmed, before.delivery_confirmed);
-    assert_eq!(after.allocation_deadline, before.allocation_deadline);
+    assert_eq!(after.reservation_id, before.reservation_id);
 
     let unit = MockInventoryContractClient::new(&h.env, &h.inv_id).get_blood_unit(&unit_id);
     assert_eq!(unit.status, BloodStatus::Delivered);
@@ -419,6 +555,41 @@ fn test_settle_payment_is_idempotent_after_settlement() {
     assert_eq!(payment.status, PaymentStatus::Released);
 }
 
+/// The reservation created by allocate_units is the sole record of the
+/// allocation deadline: its expiration_timestamp must equal ledger-now plus
+/// ALLOCATION_EXPIRY_SECONDS, and expire_workflow must read that same value
+/// rather than a separately-tracked WorkflowRecord field.
+#[test]
+fn test_reservation_ttl_matches_allocation_expiry_and_gates_expiry() {
+    let h = setup();
+    h.env.ledger().with_mut(|l| l.timestamp = 5_000);
+
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let payment_id = create_locked_payment(&h, 1);
+    h.coord
+        .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+
+    let wf = h.coord.get_workflow(&1u64);
+    let deadline = reservation_deadline(&h, wf.reservation_id);
+    assert_eq!(deadline, 5_000 + crate::ALLOCATION_EXPIRY_SECONDS);
+
+    // One second before the reservation's own deadline: still not expirable.
+    h.env.ledger().with_mut(|l| l.timestamp = deadline - 1);
+    assert_eq!(
+        h.coord.try_expire_workflow(&1u64),
+        Err(Ok(CoordinatorError::WorkflowNotExpired))
+    );
+
+    // Past it: expire_workflow succeeds and releases the reservation.
+    h.env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+    h.coord.expire_workflow(&1u64);
+    assert_eq!(h.coord.get_workflow(&1u64).status, WorkflowStatus::Expired);
+
+    let unit = MockInventoryContractClient::new(&h.env, &h.inv_id).get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Available);
+}
+
 #[test]
 fn test_expire_workflow_rejects_before_deadline() {
     let h = setup();
@@ -446,8 +617,9 @@ fn test_expire_workflow_releases_units_refunds_payment_and_marks_expired() {
     h.coord
         .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     let wf = h.coord.get_workflow(&1u64);
+    let deadline = reservation_deadline(&h, wf.reservation_id);
     h.env.ledger().with_mut(|li| {
-        li.timestamp = wf.allocation_deadline + 1;
+        li.timestamp = deadline + 1;
     });
 
     h.coord.expire_workflow(&1u64);
@@ -473,8 +645,9 @@ fn test_expire_workflow_is_idempotent_after_expiry() {
     h.coord
         .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     let wf = h.coord.get_workflow(&1u64);
+    let deadline = reservation_deadline(&h, wf.reservation_id);
     h.env.ledger().with_mut(|li| {
-        li.timestamp = wf.allocation_deadline + 1;
+        li.timestamp = deadline + 1;
     });
 
     h.coord.expire_workflow(&1u64);
@@ -503,11 +676,13 @@ fn test_expire_workflow_inventory_failure_leaves_no_partial_state() {
         &h.admin,
     );
     let wf = h.coord.get_workflow(&1u64);
+    let deadline = reservation_deadline(&h, wf.reservation_id);
     h.env.ledger().with_mut(|li| {
-        li.timestamp = wf.allocation_deadline + 1;
+        li.timestamp = deadline + 1;
     });
 
-    MockInventoryContractClient::new(&h.env, &h.inv_id).fail_update_for_unit(&second_unit_id);
+    MockInventoryContractClient::new(&h.env, &h.inv_id)
+        .fail_release_for_reservation(&wf.reservation_id);
 
     let result = h.coord.try_expire_workflow(&1u64);
     assert!(result.is_err());
@@ -539,8 +714,9 @@ fn test_expire_workflow_payment_failure_leaves_no_partial_state() {
     h.coord
         .allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
     let wf = h.coord.get_workflow(&1u64);
+    let deadline = reservation_deadline(&h, wf.reservation_id);
     h.env.ledger().with_mut(|li| {
-        li.timestamp = wf.allocation_deadline + 1;
+        li.timestamp = deadline + 1;
     });
 
     MockPaymentContractClient::new(&h.env, &h.pay_id).fail_updates();
@@ -832,7 +1008,8 @@ fn test_exit_always_invariant_over_flag_lattice() {
     }
 }
 
-/// Deadline extension: pausing dlvr extends the allocation_deadline by the pause duration.
+/// Deadline extension: pausing dlvr extends the reservation's deadline
+/// (in inventory) by the pause duration.
 #[test]
 fn test_deadline_extended_during_dlvr_pause() {
     use soroban_sdk::symbol_short;
@@ -843,7 +1020,8 @@ fn test_deadline_extended_during_dlvr_pause() {
     let uid = register_unit(&h);
     let pid = create_locked_payment(&h, 80);
     h.coord.allocate_units(&80u64, &vec![&h.env, uid], &pid, &h.admin);
-    let original_deadline = h.coord.get_workflow(&80u64).allocation_deadline;
+    let wf = h.coord.get_workflow(&80u64);
+    let original_deadline = reservation_deadline(&h, wf.reservation_id);
 
     // Pause dlvr at t=1000, unpause at t=2000 (1000s pause)
     h.coord.pause_flag(&h.admin, &symbol_short!("dlvr"));
@@ -853,11 +1031,12 @@ fn test_deadline_extended_during_dlvr_pause() {
     // confirm_delivery should extend the deadline
     h.coord.confirm_delivery(&80u64, &h.admin);
     let wf = h.coord.get_workflow(&80u64);
+    let new_deadline = reservation_deadline(&h, wf.reservation_id);
     // deadline must be >= original + 1000s pause duration
     assert!(
-        wf.allocation_deadline >= original_deadline + 1_000,
+        new_deadline >= original_deadline + 1_000,
         "deadline not extended: got {}, expected >= {}",
-        wf.allocation_deadline,
+        new_deadline,
         original_deadline + 1_000
     );
 }
@@ -1021,10 +1200,16 @@ mod upgrade_tests {
         let h = setup();
 
         // Simulate storage written by an older binary (schema 0 < target).
-        // Register a fresh coordinator with constructor args.
-        let coord_id = h.env.register(
+        // Register a fresh coordinator with constructor args, honoring the
+        // same admin-wiring invariant as `setup()`.
+        let admin = Address::generate(&h.env);
+        let coord_id = Address::generate(&h.env);
+        let inv_id = h.env.register(MockInventoryContract, ());
+        MockInventoryContractClient::new(&h.env, &inv_id).initialize(&coord_id);
+        h.env.register_at(
+            &coord_id,
             CoordinatorContract,
-            (&h.admin, &h.req_id, &h.inv_id, &h.pay_id),
+            (&admin, &h.req_id, &inv_id, &h.pay_id),
         );
         let coord = CoordinatorContractClient::new(&h.env, &coord_id);
         h.env.as_contract(&coord_id, || {
@@ -1061,15 +1246,16 @@ mod upgrade_tests {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
+        let coord_id = Address::generate(&env);
 
         // The requests contract reports an unsupported code version.
         let req_id = env.register(MockIncompatibleContract, ());
         let inv_id = env.register(MockInventoryContract, ());
         let pay_id = env.register(MockPaymentContract, ());
-        MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
+        MockInventoryContractClient::new(&env, &inv_id).initialize(&coord_id);
 
-        // Coordinator uses __constructor — pass args at register time.
-        let coord_id = env.register(
+        env.register_at(
+            &coord_id,
             CoordinatorContract,
             (&admin, &req_id, &inv_id, &pay_id),
         );
@@ -1100,14 +1286,15 @@ mod upgrade_tests {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
+        let coord_id = Address::generate(&env);
 
         let req_id = env.register(MockVersionlessContract, ());
         let inv_id = env.register(MockInventoryContract, ());
         let pay_id = env.register(MockPaymentContract, ());
-        MockInventoryContractClient::new(&env, &inv_id).initialize(&admin);
+        MockInventoryContractClient::new(&env, &inv_id).initialize(&coord_id);
 
-        // Coordinator uses __constructor — pass args at register time.
-        let coord_id = env.register(
+        env.register_at(
+            &coord_id,
             CoordinatorContract,
             (&admin, &req_id, &inv_id, &pay_id),
         );
@@ -1168,5 +1355,118 @@ mod upgrade_rehearsal {
 
         let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
         assert_eq!(payment.status, PaymentStatus::Released);
+    }
+}
+
+// ── Blood-type compatibility regression tests ─────────────────────────────────
+
+/// Allocating an O+ unit against an A- request must be rejected on-chain.
+/// O+ can only donate to O+, A+, B+, AB+ — not A-.
+#[test]
+fn test_allocate_rejects_incompatible_blood_type() {
+    let h = setup();
+    // Request requires A- blood
+    MockRequestContractClient::new(&h.env, &h.req_id)
+        .seed_request_with_type(&1u64, &RequestStatus::Pending, &BloodType::ANegative);
+    // Register an O+ unit (incompatible with A-)
+    let unit_id = MockInventoryContractClient::new(&h.env, &h.inv_id)
+        .register_unit(&BloodType::OPositive);
+    let payment_id = create_locked_payment(&h, 1);
+
+    let result = h
+        .coord
+        .try_allocate_units(&1u64, &vec![&h.env, unit_id], &payment_id, &h.admin);
+    assert_eq!(result, Err(Ok(CoordinatorError::IncompatibleBloodType)));
+
+    // No workflow must have been created and the unit must remain Available.
+    assert!(h.coord.try_get_workflow(&1u64).is_err());
+    let unit = MockInventoryContractClient::new(&h.env, &h.inv_id).get_blood_unit(&unit_id);
+    assert_eq!(unit.status, BloodStatus::Available);
+}
+
+/// O- is the universal donor — it must be accepted for every recipient type.
+#[test]
+fn test_allocate_accepts_universal_donor_for_all_recipients() {
+    let recipients = [
+        BloodType::APositive,
+        BloodType::ANegative,
+        BloodType::BPositive,
+        BloodType::BNegative,
+        BloodType::ABPositive,
+        BloodType::ABNegative,
+        BloodType::OPositive,
+        BloodType::ONegative,
+    ];
+
+    for (i, recipient) in recipients.iter().enumerate() {
+        let h = setup();
+        let request_id = i as u64 + 1;
+        MockRequestContractClient::new(&h.env, &h.req_id).seed_request_with_type(
+            &request_id,
+            &RequestStatus::Pending,
+            recipient,
+        );
+        let unit_id = MockInventoryContractClient::new(&h.env, &h.inv_id)
+            .register_unit(&BloodType::ONegative);
+        let payment_id = create_locked_payment(&h, request_id);
+
+        let result = h.coord.try_allocate_units(
+            &request_id,
+            &vec![&h.env, unit_id],
+            &payment_id,
+            &h.admin,
+        );
+        assert!(
+            result.is_ok(),
+            "O- must be accepted for recipient {:?}",
+            recipient
+        );
+    }
+}
+
+// ── Matching-contract compatibility parity ─────────────────────────────────────
+//
+// The coordinator inlines its own copy of the ABO/Rh compatibility matrix
+// (see `is_compatible` in lib.rs) rather than cross-calling the matching
+// contract's `match_request` for every allocation. matching-contract is kept
+// as a pre-allocation advisory: a caller can query it to decide which
+// unit_ids to submit to allocate_units, but allocate_units independently
+// re-validates compatibility. This test proves the two copies of the
+// compatibility predicate can never diverge — the property both the
+// advisory recommendation and the authoritative check ultimately rely on.
+#[test]
+fn test_coordinator_and_matching_compatibility_never_diverge() {
+    let types = [
+        BloodType::APositive,
+        BloodType::ANegative,
+        BloodType::BPositive,
+        BloodType::BNegative,
+        BloodType::ABPositive,
+        BloodType::ABNegative,
+        BloodType::OPositive,
+        BloodType::ONegative,
+    ];
+    let matching_types = [
+        matching_contract::BloodType::APositive,
+        matching_contract::BloodType::ANegative,
+        matching_contract::BloodType::BPositive,
+        matching_contract::BloodType::BNegative,
+        matching_contract::BloodType::ABPositive,
+        matching_contract::BloodType::ABNegative,
+        matching_contract::BloodType::OPositive,
+        matching_contract::BloodType::ONegative,
+    ];
+
+    for (i, donor) in types.iter().enumerate() {
+        for (j, recipient) in types.iter().enumerate() {
+            let coord_result = super::is_compatible(*donor, *recipient);
+            let matching_result =
+                matching_contract::is_compatible(matching_types[i], matching_types[j]);
+            assert_eq!(
+                coord_result, matching_result,
+                "compatibility mismatch for donor={:?} recipient={:?}: coordinator={}, matching={}",
+                donor, recipient, coord_result, matching_result
+            );
+        }
     }
 }
