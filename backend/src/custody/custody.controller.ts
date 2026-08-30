@@ -1,12 +1,16 @@
 import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
 import { Permission } from '../auth/enums/permission.enum';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
-import { ConfirmHandoffDto, RecordHandoffDto } from './dto/custody.dto';
+
 import { CustodyService } from './custody.service';
+import { ConfirmHandoffDto, RecordHandoffDto } from './dto/custody.dto';
+
+import type { AuthenticatedUser } from '../auth/jwt.strategy';
 
 @ApiTags('Custody')
 @ApiBearerAuth()
@@ -25,8 +29,22 @@ export class CustodyController {
   @Post('handoffs/:id/confirm')
   @RequirePermissions(Permission.TRANSFER_CUSTODY)
   @ApiOperation({ summary: 'Confirm a pending custody handoff' })
-  confirm(@Param('id') id: string, @Body() dto: ConfirmHandoffDto) {
-    return this.service.confirmHandoff(id, dto);
+  confirm(
+    @Param('id') id: string,
+    @Body() dto: ConfirmHandoffDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.confirmHandoff(id, dto, user?.id);
+  }
+
+  @Get('handoffs/degraded')
+  @RequirePermissions(Permission.VIEW_BLOODUNIT_TRAIL)
+  @ApiOperation({
+    summary:
+      'List custody handoffs with failed or unverified on-chain transfers',
+  })
+  degraded() {
+    return this.service.getDegradedHandoffs();
   }
 
   @Get('units/:bloodUnitId/timeline')
