@@ -1,6 +1,7 @@
 export enum DisputeStatus {
   OPEN = 'open',
   UNDER_REVIEW = 'under_review',
+  RESOLUTION_PENDING = 'resolution_pending',
   RESOLVED = 'resolved',
   CLOSED = 'closed',
 }
